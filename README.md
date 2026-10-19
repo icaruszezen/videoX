@@ -37,3 +37,5 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
 - `POST /jobs/{id}/cancel`：取消任务
 
 OpenAPI 在 `/openapi.json`。
+
+桌面界面在 `desktop`。安装依赖后运行 `npm run dev`，窗口会连接这个 API；服务没开时可以在界面里启动。

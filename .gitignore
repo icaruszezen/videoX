@@ -10,3 +10,6 @@ output/
 tools/
 .work/
 third_party/seedvr2/
+desktop/node_modules/
+desktop/out/
+desktop/dist/

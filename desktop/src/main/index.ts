@@ -1,0 +1,95 @@
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { join } from 'path'
+import { electronApp, is, optimizer } from '@electron-toolkit/utils'
+import icon from '../../resources/icon.png?asset'
+
+import { getServerState, killOwnedServer, startServer, stopServer } from './server'
+
+let mainWindow: BrowserWindow | null = null
+
+function createWindow(): void {
+  mainWindow = new BrowserWindow({
+    width: 1180,
+    height: 800,
+    minWidth: 960,
+    minHeight: 640,
+    show: false,
+    autoHideMenuBar: true,
+    backgroundColor: '#18181b',
+    title: 'VideoX',
+    ...(process.platform === 'linux' ? { icon } : {}),
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
+
+  mainWindow.on('ready-to-show', () => {
+    mainWindow?.show()
+  })
+
+  mainWindow.webContents.setWindowOpenHandler((details) => {
+    shell.openExternal(details.url)
+    return { action: 'deny' }
+  })
+
+  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+  } else {
+    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+  }
+}
+
+function registerIpc(): void {
+  ipcMain.handle('dialog:pick-input', async () => {
+    const options = {
+      title: '选择要修复的视频',
+      properties: ['openFile'] as Array<'openFile'>,
+      filters: [{ name: '视频', extensions: ['mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v'] }]
+    }
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, options)
+      : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle('dialog:pick-output', async (_event, defaultPath: unknown) => {
+    const options = {
+      title: '保存修复结果',
+      defaultPath: typeof defaultPath === 'string' ? defaultPath : undefined,
+      filters: [{ name: 'MP4', extensions: ['mp4'] }]
+    }
+    const result = mainWindow
+      ? await dialog.showSaveDialog(mainWindow, options)
+      : await dialog.showSaveDialog(options)
+    if (result.canceled || !result.filePath) return null
+    return result.filePath
+  })
+
+  ipcMain.handle('server:status', () => getServerState())
+  ipcMain.handle('server:start', () => startServer())
+  ipcMain.handle('server:stop', () => stopServer())
+}
+
+app.whenReady().then(() => {
+  electronApp.setAppUserModelId('com.videox.desktop')
+  app.on('browser-window-created', (_, window) => {
+    optimizer.watchWindowShortcuts(window)
+  })
+  registerIpc()
+  createWindow()
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  })
+})
+
+app.on('before-quit', () => {
+  killOwnedServer()
+})
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit()
+})
