@@ -1,4 +1,4 @@
-import type { EngineManifest, JobRecord, SystemReport } from './types'
+import type { EngineManifest, JobRecord, MediaKind, SystemReport } from './types'
 
 export const API_BASE = 'http://127.0.0.1:8765'
 
@@ -16,6 +16,7 @@ export interface CreateJobBody {
   engine_id: string
   input_path: string
   output_path: string
+  media: MediaKind
   devices?: number[]
   params: Record<string, unknown>
 }

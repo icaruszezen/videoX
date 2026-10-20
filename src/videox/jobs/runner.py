@@ -13,6 +13,7 @@ from videox.errors import VideoXError
 from videox.jobs.models import EventType, JobRecord, JobSpec, JobStatus, ProgressEvent
 from videox.jobs.store import JobStore
 from videox.media.ffmpeg import probe_media, remux_audio, transmux_video
+from videox.media.kinds import IMAGE_SUFFIXES, resolve_media
 from videox.paths import ensure_tool_path, model_dir
 
 
@@ -51,16 +52,7 @@ class JobRunner:
         background: bool,
         echo: Callable[[str], None] | None = None,
     ) -> JobRecord:
-        self.registry.get(spec.engine_id)
-        input_path = Path(spec.input_path).expanduser().resolve()
-        if not input_path.is_file():
-            raise VideoXError(f"输入文件不存在: {input_path}")
-        output_path = Path(spec.output_path).expanduser().resolve()
-        if output_path.suffix == "":
-            output_path = output_path.with_suffix(".mp4")
-        spec = spec.model_copy(
-            update={"input_path": str(input_path), "output_path": str(output_path)}
-        )
+        spec = self._prepare_spec(spec)
         record = self.store.create(spec)
         self.store.publish(
             ProgressEvent(job_id=record.id, type=EventType.queued, message="已排队", stage="queued")
@@ -101,18 +93,38 @@ class JobRunner:
             return
         if not self.store.update(job_id, status=JobStatus.running, stage="prepare"):
             return
+        spec = record.spec
+        image = spec.media == "image"
+        png_sequence = not image and str(spec.params.get("output_format") or "mp4") == "png"
         self._emit(
-            ProgressEvent(job_id=job_id, type=EventType.stage, stage="prepare", message="正在读取视频"),
+            ProgressEvent(
+                job_id=job_id,
+                type=EventType.stage,
+                stage="prepare",
+                message="正在读取图片" if image else "正在读取视频",
+            ),
             echo,
         )
-        spec = record.spec
         try:
             engine = self.registry.get(spec.engine_id)
             source = Path(spec.input_path)
             dest = Path(spec.output_path)
-            info = probe_media(source)
-            silent = video_only_path(dest)
-            dest.parent.mkdir(parents=True, exist_ok=True)
+            if image:
+                if dest.exists() and dest.is_dir():
+                    raise VideoXError(f"图片输出需要是文件: {dest}")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                engine_output = dest
+                info = None
+            elif png_sequence:
+                if dest.exists() and not dest.is_dir():
+                    raise VideoXError(f"PNG 序列的输出需要是目录: {dest}")
+                dest.mkdir(parents=True, exist_ok=True)
+                engine_output = dest
+                info = None
+            else:
+                info = probe_media(source)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                engine_output = video_only_path(dest)
             weights = model_dir(self.project_root)
             weights.mkdir(parents=True, exist_ok=True)
             ctx = EngineContext(
@@ -121,7 +133,7 @@ class JobRunner:
                 model_dir=weights,
                 gpus=None,
             )
-            engine_spec = spec.model_copy(update={"output_path": str(silent)})
+            engine_spec = spec.model_copy(update={"output_path": str(engine_output)})
             command = engine.build_command(engine_spec, ctx)
             workdir = engine.working_directory(ctx)
             if workdir is not None and not workdir.is_dir():
@@ -133,19 +145,27 @@ class JobRunner:
             if job_id in self._cancelled:
                 self.store.finish(job_id, JobStatus.cancelled, "已取消")
                 return
-            if not silent.is_file():
-                raise VideoXError(f"引擎没有写出视频: {silent}")
-            self._emit(
-                ProgressEvent(job_id=job_id, type=EventType.stage, stage="audio", message="正在封装音轨"),
-                echo,
-            )
-            if info.has_audio:
-                remux_audio(silent, source, dest)
-                silent.unlink(missing_ok=True)
+            if image:
+                if not dest.is_file():
+                    raise VideoXError(f"引擎没有写出图片: {dest}")
+            elif png_sequence:
+                if not any(path.suffix.lower() == ".png" for path in dest.rglob("*") if path.is_file()):
+                    raise VideoXError(f"引擎没有写出图片序列: {dest}")
             else:
-                transmux_video(silent, dest)
-            if not dest.is_file():
-                raise VideoXError(f"成片不存在: {dest}")
+                if not engine_output.is_file():
+                    raise VideoXError(f"引擎没有写出视频: {engine_output}")
+                assert info is not None
+                self._emit(
+                    ProgressEvent(job_id=job_id, type=EventType.stage, stage="audio", message="正在封装音轨"),
+                    echo,
+                )
+                if info.has_audio:
+                    remux_audio(engine_output, source, dest)
+                    engine_output.unlink(missing_ok=True)
+                else:
+                    transmux_video(engine_output, dest)
+                if not dest.is_file():
+                    raise VideoXError(f"成片不存在: {dest}")
         except VideoXError as exc:
             if job_id in self._cancelled:
                 self.store.finish(job_id, JobStatus.cancelled, "已取消")
@@ -159,6 +179,29 @@ class JobRunner:
             self.store.finish(job_id, JobStatus.failed, f"处理失败: {exc}")
             return
         self.store.finish(job_id, JobStatus.completed, f"完成: {spec.output_path}")
+
+    def _prepare_spec(self, spec: JobSpec) -> JobSpec:
+        engine = self.registry.get(spec.engine_id)
+        input_path = Path(spec.input_path).expanduser().resolve()
+        if not input_path.is_file():
+            raise VideoXError(f"输入文件不存在: {input_path}")
+        media = resolve_media(spec.media, input_path)
+        if media not in engine.manifest().media:
+            kind = "图片" if media == "image" else "视频"
+            raise VideoXError(f"{engine.manifest().name} 不支持{kind}")
+        output_path = Path(spec.output_path).expanduser().resolve()
+        if media == "image":
+            if output_path.suffix.lower() not in IMAGE_SUFFIXES:
+                output_path = output_path.with_suffix(".png")
+        elif str(spec.params.get("output_format") or "mp4") != "png" and output_path.suffix == "":
+            output_path = output_path.with_suffix(".mp4")
+        return spec.model_copy(
+            update={
+                "input_path": str(input_path),
+                "output_path": str(output_path),
+                "media": media,
+            }
+        )
 
     def _emit(self, event: ProgressEvent, echo: Callable[[str], None] | None) -> None:
         self.store.publish(event)

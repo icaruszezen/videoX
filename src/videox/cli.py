@@ -10,6 +10,7 @@ from videox.errors import VideoXError
 from videox.jobs.models import JobSpec, JobStatus
 from videox.jobs.runner import JobRunner
 from videox.jobs.store import JobStore
+from videox.media.kinds import is_image_path
 from videox.paths import ensure_tool_path, project_root
 from videox.server import serve
 from videox.setup_env import setup_environment
@@ -76,7 +77,9 @@ def run(argv: list[str] | None = None) -> int:
 def _restore(args: argparse.Namespace) -> int:
     root = project_root()
     source = Path(args.input)
-    output = Path(args.output) if args.output else root / "output" / f"{source.stem}.seedvr2.mp4"
+    media = "image" if is_image_path(source) else "video"
+    suffix = ".png" if media == "image" else ".mp4"
+    output = Path(args.output) if args.output else root / "output" / f"{source.stem}.seedvr2{suffix}"
     params: dict = {}
     if args.resolution is not None:
         params["resolution"] = args.resolution
@@ -86,6 +89,7 @@ def _restore(args: argparse.Namespace) -> int:
         engine_id=args.engine,
         input_path=str(source),
         output_path=str(output),
+        media=media,
         devices=_parse_devices(args.devices),
         params=params,
     )

@@ -1,4 +1,4 @@
-import type { JobStatus, ProgressEvent, SchemaProperty, SessionJob } from './types'
+import type { JobStatus, MediaKind, ProgressEvent, SchemaProperty, SessionJob } from './types'
 
 export const EVENT_TYPES = [
   'queued',
@@ -41,7 +41,8 @@ export const PARAM_LABELS: Record<string, string> = {
   dit_offload_device: '卸载设备'
 }
 
-export function paramLabel(key: string): string {
+export function paramLabel(key: string, title?: string): string {
+  if (title) return title
   return PARAM_LABELS[key] ?? key
 }
 
@@ -91,16 +92,27 @@ export function fileStem(filePath: string): string {
   return dot > 0 ? name.slice(0, dot) : name
 }
 
-export function suggestOutput(inputPath: string, projectRoot?: string): string {
+export function suggestOutput(
+  inputPath: string,
+  projectRoot?: string,
+  media: MediaKind = 'video',
+  outputFormat: 'mp4' | 'png' = 'mp4'
+): string {
   const stem = fileStem(inputPath)
+  const name =
+    media === 'image'
+      ? `${stem}.seedvr2.png`
+      : outputFormat === 'png'
+        ? stem
+        : `${stem}.seedvr2.mp4`
   const root = projectRoot?.replace(/[/\\]+$/, '')
   if (root) {
     const sep = root.includes('\\') ? '\\' : '/'
-    return `${root}${sep}output${sep}${stem}.seedvr2.mp4`
+    return `${root}${sep}output${sep}${name}`
   }
   const sep = inputPath.includes('\\') ? '\\' : '/'
   const dir = inputPath.replace(/[/\\][^/\\]*$/, '')
-  return `${dir}${sep}${stem}.seedvr2.mp4`
+  return `${dir}${sep}${name}`
 }
 
 export function formatTime(iso: string): string {

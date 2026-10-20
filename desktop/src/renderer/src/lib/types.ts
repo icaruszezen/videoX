@@ -3,10 +3,13 @@ export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancell
 export type EventType =
   'queued' | 'stage' | 'log' | 'progress' | 'completed' | 'failed' | 'cancelled'
 
+export type MediaKind = 'video' | 'image'
+
 export interface JobSpec {
   engine_id: string
   input_path: string
   output_path: string
+  media?: MediaKind
   devices: number[] | null
   params: Record<string, unknown>
 }
@@ -55,9 +58,20 @@ export interface SystemReport {
 
 export interface SchemaProperty {
   type?: string
+  title?: string
   default?: string | number | boolean
   minimum?: number
+  maximum?: number
   description?: string
+  enum?: string[]
+  enum_labels?: Record<string, string>
+  group?: string
+  media?: MediaKind[]
+}
+
+export interface SchemaGroup {
+  id: string
+  title: string
 }
 
 export interface EngineManifest {
@@ -65,9 +79,11 @@ export interface EngineManifest {
   name: string
   description: string
   capabilities: string[]
+  media?: MediaKind[]
   params_schema: {
     type?: string
     properties?: Record<string, SchemaProperty>
+    groups?: SchemaGroup[]
   }
 }
 

@@ -6,9 +6,11 @@ export interface ServerState {
   error?: string
 }
 
+export type PickKind = 'video' | 'image' | 'directory'
+
 export interface DesktopApi {
-  pickInput: () => Promise<string | null>
-  pickOutput: (defaultPath: string) => Promise<string | null>
+  pickInput: (kind?: 'video' | 'image') => Promise<string | null>
+  pickOutput: (defaultPath: string, kind?: PickKind) => Promise<string | null>
   serverStatus: () => Promise<ServerState>
   serverStart: () => Promise<ServerState>
   serverStop: () => Promise<ServerState>

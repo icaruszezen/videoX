@@ -17,7 +17,9 @@ def test_engines_and_missing_input(tmp_path, monkeypatch):
     body = engines.json()
     assert body[0]["id"] == "seedvr2"
     assert "upscale" in body[0]["capabilities"]
+    assert body[0]["media"] == ["video", "image"]
     assert "dit_model" in body[0]["params_schema"]["properties"]
+    assert body[0]["params_schema"]["properties"]["batch_size"]["media"] == ["video"]
 
     created = client.post(
         "/jobs",

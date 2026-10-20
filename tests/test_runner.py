@@ -2,11 +2,14 @@ import sys
 from pathlib import Path
 
 from videox.engines.base import EngineContext, LogInsight
+from videox.errors import VideoXError
 from videox.jobs.models import EngineManifest, JobSpec, JobStatus
 from videox.jobs.runner import JobRunner
 from videox.jobs.store import JobStore
 from videox.engines.registry import EngineRegistry
 from videox.media.ffmpeg import MediaInfo
+from videox.media.kinds import resolve_media
+import pytest
 
 
 class FakeEngine:
@@ -21,6 +24,7 @@ class FakeEngine:
             name="Fake",
             description="test",
             capabilities=["upscale"],
+            media=["video", "image"],
             params_schema={},
         )
 
@@ -85,6 +89,84 @@ def test_runner_moves_silent_video(tmp_path: Path, monkeypatch):
     )
     assert record.status == JobStatus.completed
     assert dest.read_bytes() == b"vid"
+
+
+def test_runner_writes_image_without_remux(tmp_path: Path, monkeypatch):
+    source = tmp_path / "in.png"
+    source.write_bytes(b"in")
+    dest = tmp_path / "out.png"
+
+    def forbidden(path: Path, *args: object, **kwargs: object) -> None:
+        raise AssertionError(path)
+
+    monkeypatch.setattr("videox.jobs.runner.probe_media", forbidden)
+    monkeypatch.setattr("videox.jobs.runner.remux_audio", forbidden)
+    code = "from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b'img')"
+    runner = _runner(tmp_path, [sys.executable, "-c", code])
+    record = runner.submit(
+        JobSpec(
+            engine_id="fake",
+            media="image",
+            input_path=str(source),
+            output_path=str(dest),
+        ),
+        background=False,
+    )
+    assert record.status == JobStatus.completed
+    assert record.spec.media == "image"
+    assert dest.read_bytes() == b"img"
+
+
+def test_runner_keeps_png_sequence_in_place(tmp_path: Path, monkeypatch):
+    source = tmp_path / "in.mp4"
+    source.write_bytes(b"in")
+    dest = tmp_path / "frames"
+
+    def forbidden(path: Path, *args: object, **kwargs: object) -> None:
+        raise AssertionError(path)
+
+    monkeypatch.setattr("videox.jobs.runner.probe_media", forbidden)
+    monkeypatch.setattr("videox.jobs.runner.remux_audio", forbidden)
+    code = (
+        "from pathlib import Path; import sys; "
+        "dest = Path(sys.argv[1]); dest.mkdir(parents=True, exist_ok=True); "
+        "(dest / 'frame_000000.png').write_bytes(b'png')"
+    )
+    runner = _runner(tmp_path, [sys.executable, "-c", code])
+    record = runner.submit(
+        JobSpec(
+            engine_id="fake",
+            input_path=str(source),
+            output_path=str(dest),
+            params={"output_format": "png"},
+        ),
+        background=False,
+    )
+    assert record.status == JobStatus.completed
+    assert (dest / "frame_000000.png").read_bytes() == b"png"
+
+
+def test_runner_rejects_image_request_for_video(tmp_path: Path):
+    source = tmp_path / "in.mp4"
+    source.write_bytes(b"in")
+    runner = _runner(tmp_path, [sys.executable, "-c", "pass"])
+    with pytest.raises(VideoXError, match="图片"):
+        runner.submit(
+            JobSpec(
+                engine_id="fake",
+                media="image",
+                input_path=str(source),
+                output_path=str(tmp_path / "out.png"),
+            ),
+            background=False,
+        )
+
+
+def test_resolve_media_follows_the_requested_kind(tmp_path: Path):
+    assert resolve_media("video", tmp_path / "clip.mp4") == "video"
+    assert resolve_media("image", tmp_path / "still.png") == "image"
+    with pytest.raises(VideoXError, match="图片文件"):
+        resolve_media("video", tmp_path / "still.webp")
 
 
 def test_runner_reports_engine_failure(tmp_path: Path, monkeypatch):

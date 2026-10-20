@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import { AppShell, type AppPage } from '@/components/app-shell'
+import { ImagePage } from '@/components/image-page'
 import { RestorePage } from '@/components/restore-page'
 import { SystemPage } from '@/components/system-page'
 import { Toaster } from '@/components/ui/sonner'
@@ -66,6 +67,18 @@ function App(): React.JSX.Element {
       >
         <div className={page === 'restore' ? 'block' : 'hidden'}>
           <RestorePage
+            connected={connected}
+            projectRoot={server?.projectRoot ?? system?.project_root}
+            system={system}
+            engines={engines}
+            jobs={jobs}
+            selectedId={selectedId}
+            onJobsChange={setJobs}
+            onSelectJob={selectJob}
+          />
+        </div>
+        <div className={page === 'image' ? 'block' : 'hidden'}>
+          <ImagePage
             connected={connected}
             projectRoot={server?.projectRoot ?? system?.project_root}
             system={system}

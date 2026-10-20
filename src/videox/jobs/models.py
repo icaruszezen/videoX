@@ -27,10 +27,14 @@ class EventType(str, Enum):
     cancelled = "cancelled"
 
 
+MediaKind = Literal["video", "image"]
+
+
 class JobSpec(BaseModel):
     engine_id: str = "seedvr2"
     input_path: str
     output_path: str
+    media: MediaKind = "video"
     devices: list[int] | None = None
     params: dict[str, Any] = Field(default_factory=dict)
 
@@ -61,4 +65,5 @@ class EngineManifest(BaseModel):
     name: str
     description: str
     capabilities: list[Capability]
+    media: list[MediaKind] = Field(default_factory=lambda: ["video"])
     params_schema: dict[str, Any]

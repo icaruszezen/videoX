@@ -43,11 +43,14 @@ function createWindow(): void {
 }
 
 function registerIpc(): void {
-  ipcMain.handle('dialog:pick-input', async () => {
+  ipcMain.handle('dialog:pick-input', async (_event, kind: unknown) => {
+    const image = kind === 'image'
     const options = {
-      title: '选择要修复的视频',
+      title: image ? '选择要处理的图片' : '选择要修复的视频',
       properties: ['openFile'] as Array<'openFile'>,
-      filters: [{ name: '视频', extensions: ['mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v'] }]
+      filters: image
+        ? [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tif', 'tiff'] }]
+        : [{ name: '视频', extensions: ['mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v'] }]
     }
     const result = mainWindow
       ? await dialog.showOpenDialog(mainWindow, options)
@@ -56,11 +59,35 @@ function registerIpc(): void {
     return result.filePaths[0]
   })
 
-  ipcMain.handle('dialog:pick-output', async (_event, defaultPath: unknown) => {
+  ipcMain.handle('dialog:pick-output', async (_event, defaultPath: unknown, kind: unknown) => {
+    const fallback = typeof defaultPath === 'string' ? defaultPath : undefined
+    if (kind === 'directory') {
+      const options = {
+        title: '选择 PNG 序列目录',
+        defaultPath: fallback,
+        properties: ['openDirectory', 'createDirectory'] as Array<
+          'openDirectory' | 'createDirectory'
+        >
+      }
+      const result = mainWindow
+        ? await dialog.showOpenDialog(mainWindow, options)
+        : await dialog.showOpenDialog(options)
+      if (result.canceled || result.filePaths.length === 0) return null
+      return result.filePaths[0]
+    }
+    const image = kind === 'image'
     const options = {
-      title: '保存修复结果',
-      defaultPath: typeof defaultPath === 'string' ? defaultPath : undefined,
-      filters: [{ name: 'MP4', extensions: ['mp4'] }]
+      title: image ? '保存处理后的图片' : '保存修复结果',
+      defaultPath: fallback,
+      filters: image
+        ? [
+            { name: 'PNG', extensions: ['png'] },
+            { name: 'JPEG', extensions: ['jpg', 'jpeg'] },
+            { name: 'WebP', extensions: ['webp'] },
+            { name: 'BMP', extensions: ['bmp'] },
+            { name: 'TIFF', extensions: ['tif', 'tiff'] }
+          ]
+        : [{ name: 'MP4', extensions: ['mp4'] }]
     }
     const result = mainWindow
       ? await dialog.showSaveDialog(mainWindow, options)

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { ClapperboardIcon, CpuIcon } from 'lucide-react'
+import { ClapperboardIcon, CpuIcon, ImageIcon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button'
 import { cn } from 'cn'
 import type { ServerState } from '../../../shared/desktop'
 
-export type AppPage = 'restore' | 'system'
+export type AppPage = 'restore' | 'image' | 'system'
 
 interface AppShellProps {
   page: AppPage
@@ -82,6 +82,14 @@ export function AppShell({
             修复
           </Button>
           <Button
+            variant={page === 'image' ? 'secondary' : 'ghost'}
+            className="justify-start"
+            onClick={() => onPageChange('image')}
+          >
+            <ImageIcon data-icon="inline-start" />
+            图片
+          </Button>
+          <Button
             variant={page === 'system' ? 'secondary' : 'ghost'}
             className="justify-start"
             onClick={() => onPageChange('system')}
@@ -123,7 +131,9 @@ export function AppShell({
       </aside>
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex h-14 items-center justify-between border-b px-6">
-          <h1 className="text-base font-medium">{page === 'restore' ? '修复' : '系统'}</h1>
+          <h1 className="text-base font-medium">
+            {page === 'restore' ? '修复' : page === 'image' ? '图片' : '系统'}
+          </h1>
           <span className={cn('text-xs text-muted-foreground')}>
             {connected ? 'API 可用' : '等待本地 API'}
           </span>

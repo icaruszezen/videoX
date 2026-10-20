@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import queue
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +23,7 @@ class CreateJobBody(BaseModel):
     engine_id: str = "seedvr2"
     input_path: str
     output_path: str
+    media: Literal["video", "image"] = "video"
     devices: list[int] | None = None
     params: dict = Field(default_factory=dict)
 
@@ -30,6 +32,7 @@ class CreateJobBody(BaseModel):
             engine_id=self.engine_id,
             input_path=self.input_path,
             output_path=self.output_path,
+            media=self.media,
             devices=self.devices,
             params=self.params,
         )
