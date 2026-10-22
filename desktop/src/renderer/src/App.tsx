@@ -20,7 +20,7 @@ function App(): React.JSX.Element {
   const [server, setServer] = useState<ServerState | null>(null)
   const [starting, setStarting] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
-  const { jobs, setJobs, selectedId, selectJob } = useSessionJobs(connected)
+  const { jobs, setJobs, selectedIds, selectJob } = useSessionJobs(connected)
 
   const refresh = useCallback(async (): Promise<void> => {
     if (window.api) {
@@ -81,7 +81,7 @@ function App(): React.JSX.Element {
         <div className={page === 'tasks' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
           <TasksPage
             jobs={jobs}
-            selectedId={selectedId}
+            selectedId={selectedIds.video}
             onJobsChange={setJobs}
             onSelectJob={selectJob}
           />
@@ -93,7 +93,7 @@ function App(): React.JSX.Element {
             system={system}
             engines={engines}
             jobs={jobs}
-            selectedId={selectedId}
+            selectedId={selectedIds.image}
             onJobsChange={setJobs}
             onSelectJob={selectJob}
           />

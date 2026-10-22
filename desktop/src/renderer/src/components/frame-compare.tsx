@@ -16,9 +16,15 @@ interface View {
 interface FrameCompareProps {
   jobId: string
   frame: number | null
+  // Height of the inline preview panes.
+  paneClassName?: string
 }
 
-export function FrameCompare({ jobId, frame }: FrameCompareProps): React.JSX.Element {
+export function FrameCompare({
+  jobId,
+  frame,
+  paneClassName = 'h-40'
+}: FrameCompareProps): React.JSX.Element {
   const [failedFrame, setFailedFrame] = useState<number | null>(null)
   const [openJobId, setOpenJobId] = useState<string | null>(null)
   const view = useRef<View>({ scale: MIN_SCALE, pan: { x: 0, y: 0 } })
@@ -79,7 +85,7 @@ export function FrameCompare({ jobId, frame }: FrameCompareProps): React.JSX.Ele
         outputUrl={outputUrl}
         sourceReady={sourceReady}
         onSourceError={setFailedFrame}
-        className="h-40"
+        className={paneClassName}
       />
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs text-muted-foreground">第 {frame} 帧</span>
