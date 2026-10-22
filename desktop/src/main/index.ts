@@ -82,7 +82,28 @@ function registerIpc(): void {
       properties: ['openFile'] as Array<'openFile'>,
       filters: image
         ? [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tif', 'tiff'] }]
-        : [{ name: '视频', extensions: ['mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v'] }]
+        : [
+            {
+              name: '视频',
+              extensions: [
+                'mp4',
+                'mov',
+                'mkv',
+                'avi',
+                'webm',
+                'm4v',
+                'ts',
+                'mts',
+                'm2ts',
+                'flv',
+                'wmv',
+                'mpg',
+                'mpeg',
+                '3gp'
+              ]
+            },
+            { name: '所有文件', extensions: ['*'] }
+          ]
     }
     const result = mainWindow
       ? await dialog.showOpenDialog(mainWindow, options)

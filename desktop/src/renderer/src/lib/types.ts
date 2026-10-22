@@ -77,6 +77,7 @@ export interface SchemaProperty {
   default?: string | number | boolean
   minimum?: number
   maximum?: number
+  step?: number
   description?: string
   enum?: string[]
   enum_labels?: Record<string, string>

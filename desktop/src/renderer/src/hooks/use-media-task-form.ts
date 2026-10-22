@@ -104,20 +104,25 @@ export function useMediaTaskForm({
   }
 
   function setField(key: string, value: string | boolean): void {
-    setValues((current) => ({ ...current, [key]: value }))
+    // A path picked for one output format is a file for MP4 and a directory for PNG,
+    // so switching formats goes back to the suggested path.
+    const nextValues = { ...values, [key]: value }
+    if (selectedOutputFormat(media, nextValues) !== outputFormat) setOutputTouched(false)
+    setValues(nextValues)
   }
 
   function changeEngine(value: string): void {
     const next = available.find((item) => item.id === value)
     setEngineId(value)
     setValues({})
+    if (selectedOutputFormat(media, {}) !== outputFormat) setOutputTouched(false)
     if (next?.device_policy === 'single') {
       setDevices((current) => (current.length > 1 ? current.slice(0, 1) : current))
     }
   }
 
   function toggleDevice(index: number, checked: boolean): void {
-    if (engine?.device_policy === 'single') {
+    if (media === 'image' || engine?.device_policy === 'single') {
       setDevices(checked ? [index] : [])
       return
     }

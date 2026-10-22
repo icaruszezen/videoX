@@ -86,7 +86,7 @@ export function RestorePage({
                   gpus={system?.gpus ?? []}
                   devices={form.devices}
                   layout="cards"
-                  help={gpuHelp(form.engine?.device_policy)}
+                  help={gpuHelp(form.engine?.device_policy, 'video')}
                   onToggle={form.toggleDevice}
                 />
               </div>
