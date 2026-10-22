@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import sys
+import threading
+import time
 from pathlib import Path
 
 _PHASE_FUNCTIONS = (
@@ -27,7 +30,9 @@ class PreviewCursor:
 
     The first post-process call in a process may start with prepended frames.
     Later calls start with temporal-overlap context from the previous chunk.
-    Neither of those regions is part of the frames that get saved.
+    Neither of those regions is part of the frames that get saved: multi-GPU
+    runs drop the prepended frames after the workers finish, and single-GPU
+    runs have postprocess_all_batches drop them (see _wrap_postprocess).
     """
 
     def __init__(self, segment_start: int, prepend: int, skip_first: int) -> None:
@@ -107,6 +112,9 @@ class _PreviewState:
     def __init__(self) -> None:
         self.input_path: str | None = None
         self.cursor = PreviewCursor(0, 0, 0)
+        # Upstream only removes prepended frames in its multi-GPU path. A
+        # single-device parent asks postprocess_all_batches to drop them.
+        self.strip_prepend = False
         self._capture = None
 
     def configure(self, input_path: str | None, segment_start: int, prepend: int, skip_first: int) -> None:
@@ -122,6 +130,9 @@ class _PreviewState:
 
 
 _state = _PreviewState()
+# Which worker this process is, how many share the job, and which streaming
+# chunk is running, so the log parser can turn phase steps into one bar.
+_job = {"worker": 0, "workers": 1, "chunk": 0, "chunks": 1}
 
 
 def _emit(current: int, total: int, frames: int, phase: str) -> None:
@@ -133,6 +144,10 @@ def _emit(current: int, total: int, frames: int, phase: str) -> None:
                     "current": current,
                     "total": total,
                     "frames": frames,
+                    "worker": _job["worker"],
+                    "workers": _job["workers"],
+                    "chunk": max(1, _job["chunk"]),
+                    "chunks": max(1, _job["chunks"]),
                 }
             },
             ensure_ascii=False,
@@ -172,6 +187,9 @@ def _wrap_postprocess(function):
         ctx = args[0] if args else kwargs.get("ctx")
         original = kwargs.get("progress_callback")
         overlap = _safe_int(_argument(args, kwargs, "temporal_overlap", 5, 0), 0)
+        cursor = _state.cursor
+        if _state.strip_prepend and cursor.calls == 0 and cursor.prepend > 0:
+            kwargs["prepend_frames"] = cursor.prepend
         requested_prepend = _safe_int(_argument(args, kwargs, "prepend_frames", 4, 0), 0)
 
         def callback(current, total, frames, phase):
@@ -202,6 +220,125 @@ def _install_wrappers() -> None:
         setattr(phases, name, wrapper(current))
 
 
+def _install_chunk_tracking(cli) -> None:
+    """Count streaming chunks; both functions are looked up by global name."""
+    stream = cli._stream_video_chunks
+    if getattr(stream, "_videox_wrapped", False):
+        return
+    core = cli._process_frames_core
+
+    def counted_core(*args, **kwargs):
+        _job["chunk"] += 1
+        return core(*args, **kwargs)
+
+    def counted_stream(*args, **kwargs):
+        _job["chunks"] = max(1, _safe_int(kwargs.get("total_chunks"), 1))
+        _job["chunk"] = 0
+        yield from stream(*args, **kwargs)
+
+    counted_stream._videox_wrapped = True
+    cli._process_frames_core = counted_core
+    cli._stream_video_chunks = counted_stream
+
+
+def _install_flat_png_output(cli) -> None:
+    """Write a video's PNG sequence into the folder VideoX passed, not <folder>/<stem>."""
+    upstream = cli.generate_output_path
+    if getattr(upstream, "_videox_wrapped", False):
+        return
+
+    def output_path(input_path, output_format, output_dir=None, input_type=None, from_directory=False):
+        if output_dir and output_format == "png" and input_type == "video" and not from_directory:
+            return str(Path(output_dir).resolve())
+        return upstream(
+            input_path,
+            output_format,
+            output_dir=output_dir,
+            input_type=input_type,
+            from_directory=from_directory,
+        )
+
+    output_path._videox_wrapped = True
+    cli.generate_output_path = output_path
+
+
+def _install_unicode_imageio() -> None:
+    """cv2.imread/imwrite open paths with the ANSI code page on Windows.
+
+    Route them through numpy file I/O so image jobs and PNG sequences work
+    with Chinese (or any non-ASCII) paths.
+    """
+    import cv2
+    import numpy as np
+
+    if getattr(cv2.imread, "_videox_wrapped", False):
+        return
+
+    def imread(path, flags=cv2.IMREAD_COLOR):
+        try:
+            data = np.fromfile(os.fspath(path), dtype=np.uint8)
+        except OSError:
+            return None
+        return cv2.imdecode(data, flags) if data.size else None
+
+    def imwrite(path, image, params=()):
+        path = os.fspath(path)
+        ok, buffer = cv2.imencode(os.path.splitext(path)[1] or ".png", image, list(params))
+        if not ok:
+            return False
+        try:
+            buffer.tofile(path)
+        except OSError:
+            return False
+        return True
+
+    imread._videox_wrapped = imwrite._videox_wrapped = True
+    cv2.imread, cv2.imwrite = imread, imwrite
+
+
+_workers: list = []
+
+
+def _install_worker_watchdog() -> None:
+    """Fail the job when a multi-GPU worker dies.
+
+    Upstream's parent waits for every worker's result with no timeout, so a
+    worker that runs out of memory would leave the job running forever.
+    """
+    import multiprocessing.process as mp_process
+
+    start = mp_process.BaseProcess.start
+    if getattr(start, "_videox_wrapped", False):
+        return
+
+    def tracked_start(self):
+        start(self)
+        if getattr(self, "_target", None) is _wrapped_worker:
+            _workers.append(self)
+
+    tracked_start._videox_wrapped = True
+    mp_process.BaseProcess.start = tracked_start
+
+    def watch() -> None:
+        while True:
+            time.sleep(2)
+            dead = [worker for worker in list(_workers) if worker.exitcode not in (None, 0)]
+            if not dead:
+                continue
+            print(
+                f"SeedVR2 多卡子进程异常退出（退出码 {dead[0].exitcode}），任务已终止。"
+                "常见原因是显存不足，可以只选一张卡，或降低分辨率、批大小后重试。",
+                flush=True,
+            )
+            for worker in list(_workers):
+                if worker.exitcode is None:
+                    worker.terminate()
+            sys.stdout.flush()
+            os._exit(1)
+
+    threading.Thread(target=watch, daemon=True).start()
+
+
 def _bootstrap_seedvr() -> Path:
     root = Path(os.environ["VIDEOX_SEEDVR_ROOT"]).resolve()
     os.chdir(root)
@@ -213,6 +350,17 @@ def _bootstrap_seedvr() -> Path:
 def _configure_parent(argv: list[str]) -> None:
     input_path, skip, prepend = parse_preview_args(argv)
     _state.configure(input_path, skip, prepend, skip)
+    devices = device_count(argv)
+    _state.strip_prepend = devices <= 1
+    _job["workers"] = devices
+
+
+def device_count(argv: list[str]) -> int:
+    """Number of GPUs in --cuda_device, split the way upstream main() splits it."""
+    for index, token in enumerate(argv[:-1]):
+        if token == "--cuda_device":
+            return max(1, len([item for item in argv[index + 1].split(",") if item.strip()]))
+    return 1
 
 
 def _configure_worker(proc_idx: int, shared_args: dict, video_info: dict | None) -> None:
@@ -224,6 +372,10 @@ def _configure_worker(proc_idx: int, shared_args: dict, video_info: dict | None)
         prepend = 0
     start = _safe_int(info.get("start_frame"), skip)
     _state.configure(None if source is None else str(source), start, prepend, skip)
+    _state.strip_prepend = False
+    devices = str(shared_args.get("cuda_device") or "0")
+    _job["worker"] = _safe_int(proc_idx, 0)
+    _job["workers"] = max(1, len([item for item in devices.split(",") if item.strip()]))
 
 
 def _wrapped_worker(
@@ -240,6 +392,7 @@ def _wrapped_worker(
     _configure_worker(proc_idx, shared_args, video_info)
     import inference_cli
 
+    _install_chunk_tracking(inference_cli)
     return inference_cli._worker_process(
         proc_idx,
         device_id,
@@ -365,7 +518,8 @@ def _as_bgr(image):
 def _write_jpeg(path: Path, image) -> None:
     import cv2
 
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    # cv2 picks the encoder from the extension, so the temporary name keeps it.
+    temporary = path.with_name(f".{path.stem}.{os.getpid()}.tmp{path.suffix}")
     if not cv2.imwrite(str(temporary), image, [int(cv2.IMWRITE_JPEG_QUALITY), 90]):
         temporary.unlink(missing_ok=True)
         raise OSError(f"无法写出预览: {path.name}")
@@ -405,6 +559,10 @@ def main() -> int:
     root = _bootstrap_seedvr()
     saved_pythonpath = os.environ.get("PYTHONPATH", "")
     _configure_parent(sys.argv)
+    # Upstream sets this before torch is imported; _install_wrappers imports torch
+    # first, so set it here or the single-GPU run keeps the default allocator.
+    if platform.system() != "Darwin":
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
     _install_wrappers()
     import inference_cli
 
@@ -414,6 +572,10 @@ def main() -> int:
     # The upstream CLI joins PYTHONPATH with ':' which Windows does not split.
     os.environ["PYTHONPATH"] = os.pathsep.join(parts)
     _install_worker_entry()
+    _install_worker_watchdog()
+    _install_chunk_tracking(inference_cli)
+    _install_flat_png_output(inference_cli)
+    _install_unicode_imageio()
     inference_cli.main()
     _state.close()
     return 0

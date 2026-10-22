@@ -6,6 +6,7 @@ from videox.engines.seedvr2.presets import DEFAULT_DIT_MODEL
 from videox.errors import VideoXError
 from videox.hardware.gpus import GpuInfo
 from videox.jobs.models import JobSpec
+from videox.media.ffmpeg import MediaInfo
 import pytest
 
 
@@ -155,7 +156,8 @@ def test_new_flags_are_omitted_until_set(tmp_path: Path):
     assert command[command.index("--dit_offload_device") + 1] == "cpu"
     assert command[command.index("--skip_first_frames") + 1] == "2"
     assert command[command.index("--vae_encode_tile_size") + 1] == "512"
-    assert "--allow_vram_overflow" in command
+    # Upstream dropped this flag; a stale saved value must not reach the CLI.
+    assert "--allow_vram_overflow" not in command
 
 
 def test_png_sequence_rejects_10bit(tmp_path: Path):
@@ -180,3 +182,118 @@ def test_batch_size_must_be_four_n_plus_one(tmp_path: Path):
     )
     with pytest.raises(VideoXError, match="4n\\+1"):
         SeedVR2Engine().build_command(job, _context(tmp_path))
+
+
+def test_image_jobs_use_a_single_gpu(tmp_path: Path):
+    source = tmp_path / "in.png"
+    source.write_bytes(b"x")
+    for devices in (None, [1, 0]):
+        job = JobSpec(
+            input_path=str(source),
+            output_path=str(tmp_path / "out.png"),
+            media="image",
+            devices=devices,
+        )
+        command = SeedVR2Engine().build_command(job, _context(tmp_path))
+        expected = "0" if devices is None else "1"
+        assert command[command.index("--cuda_device") + 1] == expected
+
+
+def test_load_cap_below_gpu_count_drops_idle_gpus(tmp_path: Path):
+    source = tmp_path / "in.mp4"
+    source.write_bytes(b"x")
+    job = JobSpec(
+        input_path=str(source),
+        output_path=str(tmp_path / "out.mp4"),
+        devices=[0, 1],
+        params={"load_cap": 1},
+    )
+    command = SeedVR2Engine().build_command(job, _context(tmp_path))
+    assert command[command.index("--cuda_device") + 1] == "0"
+
+
+def test_streaming_keeps_models_between_chunks(tmp_path: Path):
+    source = tmp_path / "in.mp4"
+    source.write_bytes(b"x")
+    engine = SeedVR2Engine()
+    default = engine.build_command(
+        JobSpec(input_path=str(source), output_path=str(tmp_path / "out.mp4")),
+        _context(tmp_path),
+    )
+    assert default[default.index("--chunk_size") + 1] == "120"
+    assert "--cache_dit" in default and "--cache_vae" in default
+    whole = engine.build_command(
+        JobSpec(input_path=str(source), output_path=str(tmp_path / "out.mp4"), params={"chunk_size": 0}),
+        _context(tmp_path),
+    )
+    assert "--chunk_size" not in whole and "--cache_dit" not in whole
+    uncached = engine.build_command(
+        JobSpec(
+            input_path=str(source),
+            output_path=str(tmp_path / "out.mp4"),
+            params={"chunk_size": 60, "cache_models": False},
+        ),
+        _context(tmp_path),
+    )
+    assert uncached[uncached.index("--chunk_size") + 1] == "60"
+    assert "--cache_dit" not in uncached
+
+
+def test_tile_overlap_must_be_smaller_than_tile(tmp_path: Path):
+    source = tmp_path / "in.mp4"
+    source.write_bytes(b"x")
+    context = _context(tmp_path)
+    with pytest.raises(VideoXError, match="编码块重叠"):
+        SeedVR2Engine().build_command(
+            JobSpec(input_path=str(source), output_path=str(tmp_path / "out.mp4"), params={"vae_encode_tile_size": 128}),
+            context,
+        )
+    command = SeedVR2Engine().build_command(
+        JobSpec(
+            input_path=str(source),
+            output_path=str(tmp_path / "out.mp4"),
+            params={"vae_encode_tile_size": 128, "vae_encode_tile_overlap": 64},
+        ),
+        context,
+    )
+    assert command[command.index("--vae_encode_tile_overlap") + 1] == "64"
+
+
+def test_seed_and_input_container_are_checked(tmp_path: Path):
+    source = tmp_path / "in.mp4"
+    source.write_bytes(b"x")
+    with pytest.raises(VideoXError, match="随机种子"):
+        SeedVR2Engine().build_command(
+            JobSpec(input_path=str(source), output_path=str(tmp_path / "out.mp4"), params={"seed": 2**32 - 1}),
+            _context(tmp_path),
+        )
+    transport = tmp_path / "camera.mts"
+    transport.write_bytes(b"x")
+    with pytest.raises(VideoXError, match="SeedVR2 只能读取"):
+        SeedVR2Engine().build_command(
+            JobSpec(input_path=str(transport), output_path=str(tmp_path / "out.mp4")),
+            _context(tmp_path),
+        )
+
+
+def test_compile_mode_is_only_sent_for_inductor(tmp_path: Path):
+    source = tmp_path / "in.mp4"
+    source.write_bytes(b"x")
+    command = SeedVR2Engine().build_command(
+        JobSpec(
+            input_path=str(source),
+            output_path=str(tmp_path / "out.mp4"),
+            params={"compile_dit": True, "compile_backend": "cudagraphs", "compile_mode": "max-autotune"},
+        ),
+        _context(tmp_path),
+    )
+    assert command[command.index("--compile_backend") + 1] == "cudagraphs"
+    assert "--compile_mode" not in command
+
+
+def test_audio_offset_follows_skipped_frames():
+    engine = SeedVR2Engine()
+    info = MediaInfo(has_audio=True, fps=25.0)
+    assert engine.audio_offset({"skip_first_frames": 250}, info) == 10.0
+    assert engine.audio_offset({}, info) == 0.0
+    assert engine.audio_offset({"skip_first_frames": 10}, MediaInfo(has_audio=True)) is None

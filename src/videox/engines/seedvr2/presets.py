@@ -9,6 +9,11 @@ DEFAULT_COLOR_CORRECTION = "lab"
 DEFAULT_SEED = 42
 DEFAULT_ATTENTION_MODE = "sdpa"
 DEFAULT_BATCH_SIZE_IMAGE = 1
+# Frames read and restored per pass. 0 (upstream's default) holds the whole clip
+# and its upscaled result in RAM, roughly 60 MB per 1080p output frame.
+DEFAULT_CHUNK_SIZE = 120
+# Upstream seeds the VAE with seed + 1000000 and rejects anything above 2**32 - 1.
+MAX_SEED = 2**32 - 1 - 1_000_000
 
 REQUIRED_MODELS = (DEFAULT_DIT_MODEL, DEFAULT_VAE_MODEL)
 
@@ -108,6 +113,7 @@ def _integer(
     default: int | None = None,
     minimum: int = 0,
     maximum: int | None = None,
+    step: int | None = None,
     description: str = "",
 ) -> dict:
     field: dict = {
@@ -121,6 +127,8 @@ def _integer(
         field["default"] = default
     if maximum is not None:
         field["maximum"] = maximum
+    if step is not None:
+        field["step"] = step
     if description:
         field["description"] = description
     return field
@@ -194,7 +202,7 @@ def params_schema() -> dict:
                 group="primary",
                 media=BOTH,
                 default=DEFAULT_RESOLUTION,
-                minimum=1,
+                minimum=16,
                 description="输出画面短边的像素，宽高比保持不变。调高更清晰，同时更慢、更吃显存；调低更快，细节更少。1080 适合大多数成片。",
             ),
             "max_resolution": _integer(
@@ -210,7 +218,8 @@ def params_schema() -> dict:
                 group="primary",
                 media=VIDEO,
                 minimum=1,
-                description="一次送进模型的帧数，必须是 4 的倍数加 1，例如 1、5、9、13。调大更快，但显存成倍上升，不够会失败；调小更稳、更慢。框里显示的是按显存算出的推荐值：约 12GB 用 5，约 16GB 及以上用 9。没改过时仍按显存自动选择，清空则恢复自动。",
+                step=4,
+                description="一次送进模型的帧数，必须是 4 的倍数加 1（5、9、13、17…）。同一批里的帧会一起参考前后画面：调大时序更连贯、闪烁更少、整体更快，但显存占用更高，不够会失败；调小省显存，但更容易闪烁。视频不建议低于 5，设为 1 等于逐帧单独处理、没有时序一致性。显存不足时先试 GGUF 模型、换出块数、VAE 编码/解码分块，再考虑降批大小。框里显示的是按显存算出的推荐值：约 12GB 用 5，约 16GB 及以上用 9。没改过时仍按显存自动选择，清空则恢复自动。",
             ),
             "color_correction": _string(
                 "色彩校正",
@@ -218,14 +227,14 @@ def params_schema() -> dict:
                 group="quality",
                 media=BOTH,
                 choices=COLOR_CORRECTION_CHOICES,
-                description="把修复后的颜色拉回原片。LAB 最接近原色，优先用它。小波和自适应小波保留更多局部反差；HSV、AdaIN 改变更大。选关闭会让模型自己决定颜色，可能偏色。",
+                description="把修复后的颜色拉回原片。LAB 最接近原色，优先用它。小波保留放大后的细节，只取原片的低频颜色和亮度；自适应小波在小波基础上，只对过饱和区域额外校正饱和度；HSV 只按色相分段匹配饱和度，不改色相和亮度；AdaIN 对整帧做均值/方差匹配，比较粗略。选关闭会让模型自己决定颜色，可能偏色。",
             ),
             "input_noise_scale": _number(
                 "输入噪声",
                 0,
                 group="quality",
                 media=BOTH,
-                description="在输入上加少量噪声，范围 0 到 1。保持 0 最干净。高分辨率出现麻点或块状噪点时略微提高，例如 0.05 到 0.1，可以压噪；提太高会糊掉细节。",
+                description="在输入上加少量噪声，范围 0 到 1。保持 0 最干净。高分辨率出现麻点或块状噪点时适当提高，例如 0.1 到 0.3，可以压噪；提太高会糊掉细节。",
             ),
             "latent_noise_scale": _number(
                 "潜空间噪声",
@@ -239,7 +248,8 @@ def params_schema() -> dict:
                 group="quality",
                 media=BOTH,
                 default=DEFAULT_SEED,
-                description="控制随机性。相同种子和相同输入会得到相同结果，方便复现。换一个数字只会改变纹理细节，画质档次不变。",
+                maximum=MAX_SEED,
+                description=f"控制随机性。相同种子和相同输入会得到相同结果，方便复现。换一个数字只会改变纹理细节，画质档次不变。范围 0 到 {MAX_SEED}。",
             ),
             "vae_encode_tiled": _boolean(
                 "VAE 编码分块",
@@ -253,8 +263,8 @@ def params_schema() -> dict:
                 group="memory",
                 media=BOTH,
                 default=1024,
-                minimum=1,
-                description="编码每一块的边长，只在编码分块打开时生效。调大更快、接缝更少，但更吃显存；调小更省显存，接缝风险更高。默认 1024。",
+                minimum=64,
+                description="编码每一块的边长，只在编码分块打开时生效。调大更快、接缝更少，但更吃显存；调小更省显存，接缝风险更高。必须大于编码块重叠。默认 1024。",
             ),
             "vae_encode_tile_overlap": _integer(
                 "编码块重叠",
@@ -262,7 +272,7 @@ def params_schema() -> dict:
                 media=BOTH,
                 default=128,
                 minimum=0,
-                description="相邻编码块重叠的像素，用来减轻接缝。调大接缝更轻，略慢、略占显存；调小更快，接缝更明显。默认 128。",
+                description="相邻编码块重叠的像素，用来减轻接缝。调大接缝更轻，略慢、略占显存；调小更快，接缝更明显。必须小于编码块大小。默认 128。",
             ),
             "vae_decode_tiled": _boolean(
                 "VAE 解码分块",
@@ -276,8 +286,8 @@ def params_schema() -> dict:
                 group="memory",
                 media=BOTH,
                 default=1024,
-                minimum=1,
-                description="解码每一块的边长，只在解码分块打开时生效。调大更快、接缝更少，但更吃显存；调小更省显存，接缝风险更高。默认 1024。",
+                minimum=64,
+                description="解码每一块的边长，只在解码分块打开时生效。调大更快、接缝更少，但更吃显存；调小更省显存，接缝风险更高。必须大于解码块重叠。默认 1024。",
             ),
             "vae_decode_tile_overlap": _integer(
                 "解码块重叠",
@@ -285,7 +295,7 @@ def params_schema() -> dict:
                 media=BOTH,
                 default=128,
                 minimum=0,
-                description="相邻解码块重叠的像素，用来减轻接缝。调大接缝更轻，略慢、略占显存；调小更快，接缝更明显。默认 128。",
+                description="相邻解码块重叠的像素，用来减轻接缝。调大接缝更轻，略慢、略占显存；调小更快，接缝更明显。必须小于解码块大小。默认 128。",
             ),
             "blocks_to_swap": _integer(
                 "换出块数",
@@ -326,34 +336,27 @@ def params_schema() -> dict:
                 choices=OFFLOAD_CHOICES,
                 description="中间张量在计算间隙放到哪。CPU 更省显存，是稳妥默认；不卸载更快，但更容易占满显存。",
             ),
-            "allow_vram_overflow": _boolean(
-                "允许显存溢出",
-                False,
-                group="memory",
-                media=BOTH,
-                description="显存不够时借用系统内存继续跑，避免直接失败。打开后速度会明显变慢。只在反复爆显存时打开。",
-            ),
             "attention_mode": _string(
                 "注意力模式",
                 DEFAULT_ATTENTION_MODE,
                 group="performance",
                 media=BOTH,
                 choices=ATTENTION_CHOICES,
-                description="注意力的计算实现。SDPA 兼容性最好，始终可用。Flash Attention 和 SageAttention 在支持的显卡上更快、更省显存；机器没有对应依赖时会失败，改回 SDPA。",
+                description="注意力的计算实现。SDPA 兼容性最好，始终可用。Flash Attention 和 SageAttention 在支持的显卡上更快、更省显存，但需要另外安装 flash-attn / sageattention（videox setup 默认不安装）。没装时不会报错，而是自动退回（FA3→FA2、SA3→SA2，否则 SDPA），只在日志里给出警告。",
             ),
             "compile_dit": _boolean(
                 "编译 DiT",
                 False,
                 group="performance",
                 media=BOTH,
-                description="用 torch.compile 编译扩散网络。打开后稳定阶段更快，第一次编译要多等很久，换分辨率时可能重新编译。日常建议关闭。",
+                description="用 torch.compile 编译扩散网络。打开后稳定阶段更快，第一次编译要多等很久，换分辨率时可能重新编译。日常建议关闭。默认的 Inductor 后端需要 Triton；Windows 版 PyTorch 默认不带 Triton，此时会自动退回不编译（日志有警告）。",
             ),
             "compile_vae": _boolean(
                 "编译 VAE",
                 False,
                 group="performance",
                 media=BOTH,
-                description="用 torch.compile 编译 VAE。打开后编码和解码更快，第一次编译要多等很久。和编译 DiT 互不影响。",
+                description="用 torch.compile 编译 VAE。打开后编码和解码更快，第一次编译要多等很久。和编译 DiT 互不影响。默认的 Inductor 后端需要 Triton；Windows 版 PyTorch 默认不带 Triton，此时会自动退回不编译（日志有警告）。",
             ),
             "compile_backend": _string(
                 "编译后端",
@@ -361,7 +364,7 @@ def params_schema() -> dict:
                 group="performance",
                 media=BOTH,
                 choices=COMPILE_BACKEND_CHOICES,
-                description="编译使用的后端，只在打开编译后生效。Inductor 更通用。CUDA Graphs 跑起来开销更低，但输入形状一变就更挑剔。",
+                description="编译使用的后端，只在打开编译后生效。Inductor 更通用，但需要 Triton，缺少时编译会被跳过。CUDA Graphs 不需要 Triton，跑起来开销更低，但输入形状一变就更挑剔。",
             ),
             "compile_mode": _string(
                 "编译模式",
@@ -369,7 +372,7 @@ def params_schema() -> dict:
                 group="performance",
                 media=BOTH,
                 choices=COMPILE_MODE_CHOICES,
-                description="编译的优化程度，只在打开编译后生效。default 最稳。reduce-overhead 降低调度开销。max-autotune 最激进，编译最久，跑起来可能更快。",
+                description="编译的优化程度，只对 Inductor 后端生效。default 最稳。reduce-overhead 降低调度开销。max-autotune 最激进，编译最久，跑起来可能更快。",
             ),
             "compile_fullgraph": _boolean(
                 "整图编译",
@@ -391,7 +394,7 @@ def params_schema() -> dict:
                 media=VIDEO,
                 default=DEFAULT_TEMPORAL_OVERLAP,
                 minimum=0,
-                description="相邻批次以及双卡交界重叠的帧数，用来衔接画面。调高衔接更顺、闪烁更少，但重复计算更多、更慢；调低更快，接缝或闪烁更明显。默认 3。",
+                description="相邻批次以及双卡、分块交界重叠的帧数，用来衔接画面。每批实际只前进「批大小 − 重叠」帧，所以重叠越大重复计算越多：批大小 5 时重叠 3 的总计算量约为不重叠的 2.5 倍，批大小 9 时约 1.5 倍。调高衔接更顺、闪烁更少；12GB 卡想更快可改成 1（约 1.25 倍）或 0。需要小于批大小，否则批内重叠会被忽略。默认 3。",
             ),
             "prepend_frames": _integer(
                 "前置帧",
@@ -399,7 +402,7 @@ def params_schema() -> dict:
                 media=VIDEO,
                 default=DEFAULT_PREPEND_FRAMES,
                 minimum=0,
-                description="在开头补若干反向帧，处理完再丢掉，用来减轻第一帧附近的闪烁。这些帧不会出现在成片里。调高开头更稳，但多算几帧；0 最快，开头更容易闪。默认 4。",
+                description="在开头补若干反向帧，处理完再丢掉，用来减轻第一帧附近的闪烁。这些帧不会出现在成片里，单卡和双卡都一样。调高开头更稳，但多算几帧；0 最快，开头更容易闪。默认 4。",
             ),
             "uniform_batch_size": _boolean(
                 "统一批大小",
@@ -412,9 +415,16 @@ def params_schema() -> dict:
                 "分块大小",
                 group="output",
                 media=VIDEO,
-                default=0,
+                default=DEFAULT_CHUNK_SIZE,
                 minimum=0,
-                description="长视频按多少帧一段读入。0 表示整段读入，最简单。调大则分段更少、占用更多内存；调小更省内存，段与段之间多一次衔接。很长的视频可以改成几百帧。",
+                description=f"视频按多少帧一段读入、修复、写出。单卡时内存只需容纳一段：1080p 输出约每帧 60 MB 内存，{DEFAULT_CHUNK_SIZE} 帧约 7 GB。调大分段更少、接缝更少，但更吃内存；调小更省内存，段与段之间按时间重叠衔接。0 表示整段读入，1080p 一分钟的视频就要 100 GB 以上内存，只适合很短的片段。双卡时每张卡仍会把自己那一半的结果留在内存里，长视频内存不够时请只选一张卡。默认 {DEFAULT_CHUNK_SIZE}。",
+            ),
+            "cache_models": _boolean(
+                "分块间保留模型",
+                True,
+                group="output",
+                media=VIDEO,
+                description="分块处理时在各段之间把扩散模型和 VAE 留在内存里，不再每段重新加载（开启编译时也不再每段重新编译）。会额外占用约等于模型大小的系统内存（3B FP8 约 3.4 GB，7B FP16 约 16 GB），卸载设备为“不卸载”时会自动改为卸到 CPU。只在分块大小大于 0 时生效。",
             ),
             "skip_first_frames": _integer(
                 "跳过开头",
@@ -422,7 +432,7 @@ def params_schema() -> dict:
                 media=VIDEO,
                 default=0,
                 minimum=0,
-                description="从第几帧之后开始处理，用来跳过片头。调大会丢掉更多开头画面；0 表示从第一帧开始。",
+                description="从第几帧之后开始处理，用来跳过片头。调大会丢掉更多开头画面；0 表示从第一帧开始。MP4 成片的原声会同步从同一时间点开始。",
             ),
             "load_cap": _integer(
                 "最多处理帧数",
@@ -438,7 +448,7 @@ def params_schema() -> dict:
                 group="output",
                 media=VIDEO,
                 choices=OUTPUT_FORMAT_CHOICES,
-                description="MP4 会封装成视频，并尽量保留原片音轨。PNG 序列把每一帧写成图片，没有音轨，方便后期，体积也更大。",
+                description="MP4 会封装成视频，并尽量保留原片音轨。PNG 序列把每一帧写成图片，直接放在所选的输出文件夹里，没有音轨，方便后期，体积也更大。",
             ),
             "use_10bit": _boolean(
                 "10-bit 输出",
