@@ -114,11 +114,7 @@ export function suggestOutput(
   const stem = fileStem(inputPath)
   const tag = engineId || 'seedvr2'
   const name =
-    media === 'image'
-      ? `${stem}.${tag}.png`
-      : outputFormat === 'png'
-        ? stem
-        : `${stem}.${tag}.mp4`
+    media === 'image' ? `${stem}.${tag}.png` : outputFormat === 'png' ? stem : `${stem}.${tag}.mp4`
   const root = projectRoot?.replace(/[/\\]+$/, '')
   if (root) {
     const sep = root.includes('\\') ? '\\' : '/'
@@ -159,8 +155,11 @@ export function recommendedBatchSize(
   gpus: Array<{ index: number; memory_mib: number }>,
   selectedDevices: number[]
 ): number {
+  // With nothing selected the server uses the first two cards (default_devices).
   const pool =
-    selectedDevices.length > 0 ? gpus.filter((gpu) => selectedDevices.includes(gpu.index)) : gpus
+    selectedDevices.length > 0
+      ? gpus.filter((gpu) => selectedDevices.includes(gpu.index))
+      : gpus.slice(0, 2)
   if (pool.length === 0) return 5
   const smallest = Math.min(...pool.map((gpu) => gpu.memory_mib))
   return smallest >= 15 * 1024 ? 9 : 5

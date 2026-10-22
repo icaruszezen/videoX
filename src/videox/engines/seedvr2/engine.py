@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from videox.engines.base import EngineContext, LogInsight
-from videox.engines.seedvr2.logs import parse_seedvr2_line
+from videox.engines.seedvr2.logs import SeedVR2LogParser, parse_seedvr2_line
 from videox.engines.seedvr2.presets import (
     ATTENTION_CHOICES,
     COLOR_CORRECTION_CHOICES,
@@ -11,12 +11,14 @@ from videox.engines.seedvr2.presets import (
     COMPILE_MODE_CHOICES,
     DEFAULT_ATTENTION_MODE,
     DEFAULT_BATCH_SIZE_IMAGE,
+    DEFAULT_CHUNK_SIZE,
     DEFAULT_COLOR_CORRECTION,
     DEFAULT_DIT_MODEL,
     DEFAULT_PREPEND_FRAMES,
     DEFAULT_RESOLUTION,
     DEFAULT_SEED,
     DEFAULT_TEMPORAL_OVERLAP,
+    MAX_SEED,
     OUTPUT_FORMAT_CHOICES,
     max_blocks_for_model,
     params_schema,
@@ -24,7 +26,11 @@ from videox.engines.seedvr2.presets import (
 from videox.errors import VideoXError
 from videox.hardware.gpus import batch_size_for_devices, default_devices, query_gpus
 from videox.jobs.models import EngineManifest, JobSpec
+from videox.media.ffmpeg import MediaInfo
 from videox.paths import seedvr2_dir
+
+# Containers upstream's inference_cli accepts as video input (VIDEO_EXTENSIONS).
+SEEDVR2_VIDEO_SUFFIXES = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v"}
 
 
 class SeedVR2Engine:
@@ -34,7 +40,7 @@ class SeedVR2Engine:
         return EngineManifest(
             id=self.id,
             name="SeedVR2",
-            description="一步扩散修复，支持视频和图片。双卡按帧分段，每张卡各加载一份 3B FP8 模型。",
+            description="一步扩散修复，支持视频和图片。双卡时视频按帧分段，每张卡各加载一份所选模型；图片只用一张卡。",
             capabilities=["upscale"],
             media=["video", "image"],
             device_policy="multi",
@@ -56,13 +62,38 @@ class SeedVR2Engine:
     def parse_log_line(self, line: str) -> LogInsight | None:
         return parse_seedvr2_line(line)
 
+    def new_log_parser(self) -> SeedVR2LogParser:
+        return SeedVR2LogParser()
+
+    def audio_offset(self, params: dict, info: MediaInfo) -> float | None:
+        """Seconds of source audio to skip so it lines up with the restored picture."""
+        skip = params.get("skip_first_frames", 0)
+        if isinstance(skip, bool) or not isinstance(skip, (int, float)) or skip <= 0:
+            return 0.0
+        if not info.fps:
+            return None
+        return float(skip) / info.fps
+
     def build_command(self, job: JobSpec, ctx: EngineContext) -> list[str]:
         params = job.params
         video = job.media != "image"
+        source = Path(job.input_path)
+        if video and source.suffix.lower() not in SEEDVR2_VIDEO_SUFFIXES:
+            allowed = "/".join(sorted(suffix[1:] for suffix in SEEDVR2_VIDEO_SUFFIXES))
+            raise VideoXError(f"SeedVR2 只能读取 {allowed} 格式的视频，请先转成 MP4 或换用其他引擎: {source.name}")
         gpus = ctx.gpus if ctx.gpus is not None else query_gpus()
         devices = job.devices if job.devices is not None else default_devices(gpus)
         if not devices:
             raise VideoXError("没有可用的 CUDA 设备")
+        if not video:
+            # Upstream splits a one-frame image into fewer pieces than GPUs and then
+            # waits forever for the missing worker; one card is enough for one image.
+            devices = list(devices)[:1]
+        else:
+            cap = params.get("load_cap", 0)
+            if isinstance(cap, int) and not isinstance(cap, bool) and 0 < cap < len(devices):
+                # A GPU with no frames to process crashes its worker.
+                devices = list(devices)[:cap]
 
         if video and "batch_size" not in params:
             batch_size = batch_size_for_devices(devices, gpus)
@@ -87,6 +118,8 @@ class SeedVR2Engine:
             "色彩校正",
         )
         seed = _as_int(params.get("seed", DEFAULT_SEED), "随机种子")
+        if not 0 <= seed <= MAX_SEED:
+            raise VideoXError(f"随机种子需要在 0 到 {MAX_SEED} 之间")
         attention_mode = _choice(
             _as_str(params.get("attention_mode", DEFAULT_ATTENTION_MODE), "注意力模式"),
             ATTENTION_CHOICES,
@@ -115,7 +148,6 @@ class SeedVR2Engine:
             dit_offload = "cpu"
         vae_offload = _offload(_as_str(params.get("vae_offload_device", "none"), "VAE 卸载设备"))
         tensor_offload = _offload(_as_str(params.get("tensor_offload_device", "cpu"), "张量卸载设备"))
-        allow_overflow = _as_bool(params.get("allow_vram_overflow", False), "允许显存溢出")
         compile_dit = _as_bool(params.get("compile_dit", False), "编译 DiT")
         compile_vae = _as_bool(params.get("compile_vae", False), "编译 VAE")
         compile_backend = _choice(
@@ -191,33 +223,29 @@ class SeedVR2Engine:
         if video and _as_bool(params.get("uniform_batch_size", True), "统一批大小"):
             command.append("--uniform_batch_size")
         if vae_encode_tiled:
+            _check_tiles(encode_tile_size, encode_tile_overlap, "编码")
             command.append("--vae_encode_tiled")
             if encode_tile_size != 1024:
-                if encode_tile_size < 1:
-                    raise VideoXError("编码块大小需要是正整数")
                 command.extend(["--vae_encode_tile_size", str(encode_tile_size)])
             if encode_tile_overlap != 128:
-                if encode_tile_overlap < 0:
-                    raise VideoXError("编码块重叠不能小于 0")
                 command.extend(["--vae_encode_tile_overlap", str(encode_tile_overlap)])
         if vae_decode_tiled:
+            _check_tiles(decode_tile_size, decode_tile_overlap, "解码")
             command.append("--vae_decode_tiled")
             if decode_tile_size != 1024:
-                if decode_tile_size < 1:
-                    raise VideoXError("解码块大小需要是正整数")
                 command.extend(["--vae_decode_tile_size", str(decode_tile_size)])
             if decode_tile_overlap != 128:
-                if decode_tile_overlap < 0:
-                    raise VideoXError("解码块重叠不能小于 0")
                 command.extend(["--vae_decode_tile_overlap", str(decode_tile_overlap)])
         if video:
-            chunk_size = _as_int(params.get("chunk_size", 0), "分块大小")
+            chunk_size = _as_int(params.get("chunk_size", DEFAULT_CHUNK_SIZE), "分块大小")
             skip_first = _as_int(params.get("skip_first_frames", 0), "跳过开头")
             load_cap = _as_int(params.get("load_cap", 0), "最多处理帧数")
             if chunk_size < 0 or skip_first < 0 or load_cap < 0:
                 raise VideoXError("分块大小、跳过开头和最多处理帧数不能小于 0")
             if chunk_size > 0:
                 command.extend(["--chunk_size", str(chunk_size)])
+                if _as_bool(params.get("cache_models", True), "分块间保留模型"):
+                    command.extend(["--cache_dit", "--cache_vae"])
             if skip_first > 0:
                 command.extend(["--skip_first_frames", str(skip_first)])
             if load_cap > 0:
@@ -240,19 +268,29 @@ class SeedVR2Engine:
             command.extend(["--vae_offload_device", vae_offload])
         if tensor_offload != "cpu":
             command.extend(["--tensor_offload_device", tensor_offload])
-        if allow_overflow:
-            command.append("--allow_vram_overflow")
         if compile_dit:
             command.append("--compile_dit")
         if compile_vae:
             command.append("--compile_vae")
         if compile_dit or compile_vae:
-            command.extend(["--compile_backend", compile_backend, "--compile_mode", compile_mode])
+            command.extend(["--compile_backend", compile_backend])
+            if compile_backend == "inductor":
+                # torch.compile only accepts a mode for Inductor.
+                command.extend(["--compile_mode", compile_mode])
             if compile_fullgraph:
                 command.append("--compile_fullgraph")
             if compile_dynamic:
                 command.append("--compile_dynamic")
         return command
+
+
+def _check_tiles(size: int, overlap: int, label: str) -> None:
+    if size < 1:
+        raise VideoXError(f"{label}块大小需要是正整数")
+    if overlap < 0:
+        raise VideoXError(f"{label}块重叠不能小于 0")
+    if overlap >= size:
+        raise VideoXError(f"{label}块重叠（{overlap}）必须小于{label}块大小（{size}）")
 
 
 def _as_int(value: object, label: str) -> int:

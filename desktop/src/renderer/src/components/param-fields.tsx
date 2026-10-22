@@ -248,7 +248,7 @@ export function SchemaField({
         type={property.type === 'string' ? 'text' : 'number'}
         min={property.minimum}
         max={property.maximum}
-        step={property.type === 'number' ? 'any' : 1}
+        step={property.type === 'number' ? 'any' : (property.step ?? 1)}
         value={text}
         placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}

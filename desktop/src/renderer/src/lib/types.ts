@@ -87,6 +87,7 @@ export interface SchemaProperty {
   default?: SchemaScalar
   minimum?: number
   maximum?: number
+  step?: number
   description?: string
   enum?: string[]
   enum_labels?: Record<string, string>

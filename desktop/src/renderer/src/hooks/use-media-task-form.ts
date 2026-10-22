@@ -105,6 +105,11 @@ export function useMediaTaskForm({
   }
 
   function setField(key: string, value: string | boolean): void {
+    // A path picked for one output format is a file for MP4 and a directory for PNG,
+    // so switching formats goes back to the suggested path.
+    if (selectedOutputFormat(media, { ...values, [key]: value }) !== outputFormat) {
+      setOutputTouched(false)
+    }
     // Fields whose defaults follow this one (usually the model choice) move to
     // the new default unless the user picked a value that still fits.
     setValues((current) => valuesAfterChange(engine, media, current, key, value))
@@ -114,13 +119,14 @@ export function useMediaTaskForm({
     const next = available.find((item) => item.id === value)
     setEngineId(value)
     setValues({})
+    if (selectedOutputFormat(media, {}) !== outputFormat) setOutputTouched(false)
     if (next?.device_policy === 'single') {
       setDevices((current) => (current.length > 1 ? current.slice(0, 1) : current))
     }
   }
 
   function toggleDevice(index: number, checked: boolean): void {
-    if (engine?.device_policy === 'single') {
+    if (media === 'image' || engine?.device_policy === 'single') {
       setDevices(checked ? [index] : [])
       return
     }

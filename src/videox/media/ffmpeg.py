@@ -15,6 +15,19 @@ class MediaInfo:
     width: int | None = None
     height: int | None = None
     duration: float | None = None
+    fps: float | None = None
+    # Exact frame rate as ffprobe reports it, e.g. "30000/1001".
+    frame_rate: str | None = None
+    video_codec: str | None = None
+
+
+# MP4/MOV players (QuickTime, Safari, iOS) only open HEVC tagged as hvc1.
+_HVC1_SUFFIXES = {".mp4", ".m4v", ".mov"}
+
+
+def _muxer_args(dest: Path) -> list[str]:
+    # ffmpeg picks its ipod muxer for .m4v, which refuses HEVC; .m4v is plain MP4.
+    return ["-f", "mp4"] if dest.suffix.lower() == ".m4v" else []
 
 
 def ffmpeg_executable() -> str:
@@ -67,13 +80,42 @@ def probe_media(path: Path) -> MediaInfo:
         except (TypeError, ValueError):
             duration = None
     width = height = None
+    fps = frame_rate = codec = None
     if video is not None:
         try:
             width = int(video["width"])
             height = int(video["height"])
         except (KeyError, TypeError, ValueError):
             width = height = None
-    return MediaInfo(has_audio=has_audio, width=width, height=height, duration=duration)
+        for key in ("avg_frame_rate", "r_frame_rate"):
+            parsed = parse_rate(video.get(key))
+            if parsed is not None:
+                fps, frame_rate = parsed
+                break
+        codec = video.get("codec_name") or None
+    return MediaInfo(
+        has_audio=has_audio,
+        width=width,
+        height=height,
+        duration=duration,
+        fps=fps,
+        frame_rate=frame_rate,
+        video_codec=codec,
+    )
+
+
+def parse_rate(value: object) -> tuple[float, str] | None:
+    """Parse an ffprobe rate such as "30000/1001"; 0/0 and garbage give None."""
+    text = str(value or "").strip()
+    numerator, _, denominator = text.partition("/")
+    try:
+        top = float(numerator)
+        bottom = float(denominator) if denominator else 1.0
+    except ValueError:
+        return None
+    if top <= 0 or bottom <= 0:
+        return None
+    return top / bottom, text
 
 
 def remux_audio_args(
@@ -83,34 +125,45 @@ def remux_audio_args(
     *,
     ffmpeg: str = "ffmpeg",
     reencode_audio: bool = False,
+    audio_offset: float = 0.0,
+    max_duration: float | None = None,
+    hevc: bool = False,
 ) -> list[str]:
-    command = [
-        ffmpeg,
-        "-y",
-        "-i",
-        str(video_only),
-        "-i",
-        str(original),
-        "-map",
-        "0:v:0",
-        "-map",
-        "1:a:0",
-        "-c:v",
-        "copy",
-    ]
+    command = [ffmpeg, "-y", "-i", str(video_only)]
+    # Both options apply to the original only: -ss skips the audio the engine
+    # skipped in the picture, -t stops the audio where the restored video ends.
+    if audio_offset > 0:
+        command.extend(["-ss", f"{audio_offset:.6f}"])
+    if max_duration is not None and max_duration > 0:
+        command.extend(["-t", f"{max_duration:.6f}"])
+    command.extend(["-i", str(original), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy"])
+    if hevc and dest.suffix.lower() in _HVC1_SUFFIXES:
+        command.extend(["-tag:v", "hvc1"])
     if reencode_audio:
         command.extend(["-c:a", "aac", "-b:a", "192k"])
     else:
         command.extend(["-c:a", "copy"])
-    command.extend(["-shortest", str(dest)])
+    if max_duration is None:
+        # Without a known video length, fall back to trimming at the shorter stream.
+        command.append("-shortest")
+    command.extend([*_muxer_args(dest), str(dest)])
     return command
 
 
-def remux_audio(video_only: Path, original: Path, dest: Path) -> None:
+def remux_audio(
+    video_only: Path,
+    original: Path,
+    dest: Path,
+    *,
+    audio_offset: float = 0.0,
+    max_duration: float | None = None,
+    hevc: bool = False,
+) -> None:
     ffmpeg = ffmpeg_executable()
     dest.parent.mkdir(parents=True, exist_ok=True)
+    options = {"audio_offset": audio_offset, "max_duration": max_duration, "hevc": hevc}
     copied = subprocess.run(
-        remux_audio_args(video_only, original, dest, ffmpeg=ffmpeg),
+        remux_audio_args(video_only, original, dest, ffmpeg=ffmpeg, **options),
         check=False,
         capture_output=True,
         text=True,
@@ -120,7 +173,7 @@ def remux_audio(video_only: Path, original: Path, dest: Path) -> None:
     if copied.returncode == 0:
         return
     encoded = subprocess.run(
-        remux_audio_args(video_only, original, dest, ffmpeg=ffmpeg, reencode_audio=True),
+        remux_audio_args(video_only, original, dest, ffmpeg=ffmpeg, reencode_audio=True, **options),
         check=False,
         capture_output=True,
         text=True,
@@ -132,16 +185,20 @@ def remux_audio(video_only: Path, original: Path, dest: Path) -> None:
         raise VideoXError(f"回封装音轨失败: {dest}\n{detail}")
 
 
-def transmux_video(video_only: Path, dest: Path) -> None:
-    """Copy the silent video into a non-mp4 container."""
-    if dest.suffix.lower() == ".mp4":
+def transmux_video(video_only: Path, dest: Path, *, hevc: bool = False) -> None:
+    """Copy the silent video into the destination container."""
+    retag = hevc and dest.suffix.lower() in _HVC1_SUFFIXES
+    if dest.suffix.lower() == ".mp4" and not retag:
         dest.parent.mkdir(parents=True, exist_ok=True)
         video_only.replace(dest)
         return
     ffmpeg = ffmpeg_executable()
     dest.parent.mkdir(parents=True, exist_ok=True)
+    command = [ffmpeg, "-y", "-i", str(video_only), "-c", "copy"]
+    if retag:
+        command.extend(["-tag:v", "hvc1"])
     completed = subprocess.run(
-        [ffmpeg, "-y", "-i", str(video_only), "-c", "copy", str(dest)],
+        [*command, *_muxer_args(dest), str(dest)],
         check=False,
         capture_output=True,
         text=True,

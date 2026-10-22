@@ -138,7 +138,7 @@ export function MediaTaskPage({
           <GpuPicker
             gpus={system?.gpus ?? []}
             devices={form.devices}
-            help={gpuHelp(form.engine?.device_policy)}
+            help={gpuHelp(form.engine?.device_policy, media)}
             onToggle={form.toggleDevice}
           />
           {form.advancedGroups.map((group) => (

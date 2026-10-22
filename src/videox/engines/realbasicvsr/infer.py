@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from dataclasses import dataclass
@@ -17,7 +16,8 @@ from videox.engines.progress import emit_progress
 from videox.engines.realbasicvsr.arch import load_realbasicvsr
 from videox.engines.realbasicvsr.weights import ensure_checkpoint
 from videox.errors import VideoXError
-from videox.media.ffmpeg import ffmpeg_executable, ffprobe_executable
+from videox.media.ffmpeg import ffmpeg_executable
+from videox.media.frames import BT709_OUTPUT_FILTER, FrameReader
 
 
 @dataclass(frozen=True)
@@ -41,7 +41,7 @@ def run_realbasicvsr(request: RealBasicRequest) -> None:
     emit_progress("load", 0, 1)
     model = load_realbasicvsr(checkpoint, torch.device("cuda"))
     emit_progress("load", 1, 1)
-    reader = _FrameReader(request.input_path)
+    reader = FrameReader(request.input_path)
     writer: _FrameWriter | None = None
     done = 0
     total = reader.frame_count
@@ -50,9 +50,18 @@ def run_realbasicvsr(request: RealBasicRequest) -> None:
             batch = reader.read_many(request.max_seq_len)
             if not batch:
                 break
-            output = _enhance(model, batch, reader.width, reader.height)
+            try:
+                output = _enhance(model, batch, reader.width, reader.height)
+            except torch.cuda.OutOfMemoryError as exc:
+                raise VideoXError(
+                    f"显存不足：{reader.width}x{reader.height} 的原片会输出 {reader.width * 4}x{reader.height * 4}。"
+                    "显存主要随原片分辨率增长，1080p 原片在 16GB 及以下的显卡上即使一次 1 帧也放不下；"
+                    "请先把原片缩到 720p 或更低，或调小一次处理帧数。"
+                ) from exc
             if writer is None:
-                writer = _FrameWriter(request.output_path, output.shape[2], output.shape[1], reader.fps)
+                writer = _FrameWriter(
+                    request.output_path, output.shape[2], output.shape[1], reader.rate, sar=reader.sar
+                )
             for frame in output:
                 writer.write(np.ascontiguousarray(frame).tobytes())
             done += len(batch)
@@ -71,6 +80,7 @@ def run_realbasicvsr(request: RealBasicRequest) -> None:
                 reader.width,
                 reader.height,
             )
+        reader.finish()
     finally:
         reader.close()
         if writer is not None:
@@ -92,58 +102,24 @@ def _enhance(model, frames: list[bytes], width: int, height: int):
 
 
 def _pad(video: torch.Tensor) -> tuple[torch.Tensor, int, int]:
-    _batch, _time, _channels, height, width = video.shape
-    pad_h = (4 - height % 4) % 4
-    pad_w = (4 - width % 4) % 4
-    if height + pad_h < 64:
-        pad_h += 64 - (height + pad_h)
-    if width + pad_w < 64:
-        pad_w += 64 - (width + pad_w)
+    """Only tiny frames need padding (SPyNet wants 64 px); repeat the edge, not black."""
+    batch, time, channels, height, width = video.shape
+    pad_h = max(0, 64 - height)
+    pad_w = max(0, 64 - width)
     if pad_h or pad_w:
-        video = F.pad(video, (0, pad_w, 0, pad_h))
+        # Replicate padding needs a 4D tensor.
+        flat = video.reshape(batch * time, channels, height, width)
+        flat = F.pad(flat, (0, pad_w, 0, pad_h), mode="replicate")
+        video = flat.reshape(batch, time, channels, height + pad_h, width + pad_w)
     return video, height, width
 
 
-class _FrameReader:
-    def __init__(self, path: Path) -> None:
-        self.width, self.height, self.fps, self.frame_count = _probe(path)
-        self._frame_bytes = self.width * self.height * 3
-        self._process = subprocess.Popen(
-            [
-                ffmpeg_executable(),
-                "-v",
-                "error",
-                "-i",
-                str(path),
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgb24",
-                "-",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-
-    def read_many(self, count: int) -> list[bytes]:
-        frames: list[bytes] = []
-        assert self._process.stdout is not None
-        for _ in range(count):
-            blob = self._process.stdout.read(self._frame_bytes)
-            if len(blob) != self._frame_bytes:
-                break
-            frames.append(blob)
-        return frames
-
-    def close(self) -> None:
-        if self._process.stdout is not None:
-            self._process.stdout.close()
-        self._process.wait()
-
-
 class _FrameWriter:
-    def __init__(self, path: Path, width: int, height: int, fps: float) -> None:
+    def __init__(self, path: Path, width: int, height: int, rate: str, *, sar: str | None = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        filters = BT709_OUTPUT_FILTER
+        if sar:
+            filters += f",setsar={sar}"
         self._process = subprocess.Popen(
             [
                 ffmpeg_executable(),
@@ -157,18 +133,18 @@ class _FrameWriter:
                 "-s",
                 f"{width}x{height}",
                 "-r",
-                f"{fps:.6f}",
+                rate,
                 "-i",
                 "-",
                 "-an",
+                "-vf",
+                filters,
                 "-c:v",
                 "libx264",
                 "-preset",
                 "fast",
                 "-crf",
                 "16",
-                "-pix_fmt",
-                "yuv420p",
                 str(path),
             ],
             stdin=subprocess.PIPE,
@@ -187,75 +163,3 @@ class _FrameWriter:
         code = self._process.wait()
         if code != 0:
             raise VideoXError(f"写出视频失败: {error.strip()}")
-
-
-def _probe(path: Path) -> tuple[int, int, float, int]:
-    completed = subprocess.run(
-        [
-            ffprobe_executable(),
-            "-v",
-            "error",
-            "-print_format",
-            "json",
-            "-show_streams",
-            "-show_format",
-            str(path),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if completed.returncode != 0:
-        raise VideoXError(f"无法读取视频信息: {path}")
-    try:
-        payload = json.loads(completed.stdout or "{}")
-    except json.JSONDecodeError as exc:
-        raise VideoXError(f"ffprobe 输出不是 JSON: {path}") from exc
-    video = next(
-        (stream for stream in payload.get("streams") or [] if stream.get("codec_type") == "video"),
-        None,
-    )
-    if video is None:
-        raise VideoXError(f"视频里没有画面: {path}")
-    try:
-        width = int(video["width"])
-        height = int(video["height"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise VideoXError(f"读不到视频分辨率: {path}") from exc
-    fps = _parse_rate(video.get("avg_frame_rate") or video.get("r_frame_rate") or "25/1")
-    frames = _frame_count(video, payload.get("format") or {}, fps)
-    return width, height, fps, frames
-
-
-def _parse_rate(value: object) -> float:
-    text = str(value)
-    if "/" in text:
-        numerator, denominator = text.split("/", 1)
-        try:
-            den = float(denominator)
-            return float(numerator) / den if den else 25.0
-        except ValueError:
-            return 25.0
-    try:
-        return float(text)
-    except ValueError:
-        return 25.0
-
-
-def _frame_count(stream: dict, fmt: dict, fps: float) -> int:
-    raw = stream.get("nb_frames")
-    try:
-        count = int(raw)
-    except (TypeError, ValueError):
-        count = 0
-    if count > 0:
-        return count
-    try:
-        duration = float(fmt.get("duration") or 0)
-    except (TypeError, ValueError):
-        duration = 0
-    if duration > 0 and fps > 0:
-        return max(int(round(duration * fps)), 1)
-    return 1

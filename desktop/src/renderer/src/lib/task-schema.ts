@@ -18,9 +18,12 @@ export const ENGINE_HELP =
 export const IMAGE_ENGINE_HELP =
   '实际处理图片的模型。SeedVR2 是扩散修复，细节最多也最慢；Real-ESRGAN 快且省显存，适合照片和动漫；SwinIR 能超分、去噪和去 JPEG 压缩块；SCUNet 专门去噪；GFPGAN 修复人脸。切换引擎或引擎里的模型后，下面的配置项和默认值会跟着换。'
 export const GPU_HELP =
-  '勾选参与计算的显卡。都不选时，有两张及以上显卡会用前两张，只有一张就用那一张。双卡按帧分段，每张卡各加载一份模型。'
+  '勾选参与计算的显卡。都不选时，有两张及以上显卡会用前两张，只有一张就用那一张。多卡时把视频按时间切成几段，每张卡处理一段并各加载一份模型。'
 
-export function gpuHelp(policy: 'multi' | 'single' | undefined): string {
+export function gpuHelp(policy: 'multi' | 'single' | undefined, media: MediaKind): string {
+  if (media === 'image') {
+    return '图片只用一张显卡。选中多张时只用第一张，都不选时用第一张可用的卡。'
+  }
   if (policy === 'single') {
     return '这个模型只用一张显卡。选中多张时只保留第一张。都不选时用第一张可用的卡。'
   }
@@ -210,6 +213,13 @@ export function outputHelp(
   return `结果保存位置。默认放到项目 output 目录，文件名加上 .${tag}。MP4 会尽量保留原片音轨。`
 }
 
+function stepError(title: string, step: number, base: number): string {
+  const offset = ((base % step) + step) % step
+  if (offset === 0) return `${title} 需要是 ${step} 的倍数`
+  const examples = [1, 2, 3].map((k) => base + k * step).join('、')
+  return `${title} 需要是 ${step} 的倍数加 ${offset}，例如 ${examples}`
+}
+
 export function collectParams(
   fields: Array<[string, SchemaProperty]>,
   values: Record<string, string | boolean>
@@ -240,6 +250,12 @@ export function collectParams(
       }
       if (property.maximum != null && numeric > property.maximum) {
         return { error: `${title} 不能大于 ${property.maximum}` }
+      }
+      if (property.step != null && property.step > 1) {
+        const base = property.minimum ?? 0
+        if ((numeric - base) % property.step !== 0) {
+          return { error: stepError(title, property.step, base) }
+        }
       }
       if (numeric !== property.default) params[key] = numeric
       continue

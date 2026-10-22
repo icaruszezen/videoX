@@ -1,7 +1,9 @@
 """RealBasicVSR x4 network, adapted from OpenMMLab MMagic (Apache-2.0).
 
-The checkpoint stores ``generator.*`` weights. SPyNet convolutions keep the
-``conv.weight`` names used by mmcv's ConvModule.
+The OpenMMLab checkpoint stores both ``generator.*`` and ``generator_ema.*``;
+like mmedit/mmagic inference (is_use_ema=True) we load ``generator_ema.*`` and
+fall back to ``generator.*``. SPyNet convolutions keep the ``conv.weight``
+names used by mmcv's ConvModule.
 """
 
 from __future__ import annotations
@@ -244,12 +246,16 @@ class RealBasicVSRNet(nn.Module):
         self.basicvsr.spynet.requires_grad_(False)
 
     def forward(self, lqs: Tensor) -> Tensor:
-        _batch, _time, channels, height, width = lqs.size()
+        # Clean one frame at a time, as the official inference config does
+        # (batched cleaning needs several times the memory for the same result).
+        lqs = lqs.clone()
         for _attempt in range(3):
-            flat = lqs.reshape(-1, channels, height, width)
-            residues = self.image_cleaning(flat)
-            lqs = (flat + residues).view(lqs.shape)
-            if torch.mean(torch.abs(residues)) < self.dynamic_refine_thres:
+            residues = []
+            for index in range(lqs.size(1)):
+                residue = self.image_cleaning(lqs[:, index])
+                lqs[:, index] += residue
+                residues.append(residue)
+            if torch.mean(torch.abs(torch.stack(residues, dim=1))) < self.dynamic_refine_thres:
                 break
         return self.basicvsr(lqs)
 
@@ -258,17 +264,26 @@ def load_realbasicvsr(path: Path, device: torch.device) -> RealBasicVSRNet:
     try:
         raw = torch.load(path, map_location="cpu", weights_only=False)
     except Exception as exc:
-        raise VideoXError(f"无法读取 RealBasicVSR 权重: {exc}") from exc
+        # Move the unreadable file aside so the next run downloads it again.
+        try:
+            path.replace(path.with_name(path.name + ".bad"))
+        except OSError:
+            pass
+        raise VideoXError(f"无法读取 RealBasicVSR 权重，已移走损坏的文件，下次运行会重新下载: {exc}") from exc
     state = raw["state_dict"] if isinstance(raw, dict) and isinstance(raw.get("state_dict"), dict) else raw
     if not isinstance(state, dict):
         raise VideoXError("RealBasicVSR 权重格式无法识别")
-    weights = {}
-    for key, value in state.items():
-        if not isinstance(key, str) or not torch.is_tensor(value):
-            continue
-        if not key.startswith("generator.") or key.startswith("generator_ema"):
-            continue
-        weights[key.removeprefix("generator.")] = value
+    # Like mmedit/mmagic inference (is_use_ema=True), prefer the EMA generator.
+    prefix = (
+        "generator_ema."
+        if any(isinstance(key, str) and key.startswith("generator_ema.") for key in state)
+        else "generator."
+    )
+    weights = {
+        key[len(prefix):]: value
+        for key, value in state.items()
+        if isinstance(key, str) and key.startswith(prefix) and torch.is_tensor(value)
+    }
     model = RealBasicVSRNet()
     missing, unexpected = model.load_state_dict(weights, strict=False)
     if missing or unexpected:

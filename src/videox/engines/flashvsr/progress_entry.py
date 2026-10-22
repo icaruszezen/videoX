@@ -17,7 +17,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scale", type=int, default=4)
     parser.add_argument("--sparse-ratio", type=float, default=2.0)
     parser.add_argument("--local-range", type=int, default=11)
-    parser.add_argument("--kv-ratio", type=float, default=3.0)
+    parser.add_argument("--kv-ratio", type=int, default=3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--color-fix", action="store_true")

@@ -125,4 +125,8 @@ def create_app(runner: JobRunner | None = None) -> FastAPI:
 def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
     import uvicorn
 
-    uvicorn.run(create_app(), host=host, port=port)
+    app = create_app()
+    try:
+        uvicorn.run(app, host=host, port=port)
+    finally:
+        app.state.runner.shutdown()

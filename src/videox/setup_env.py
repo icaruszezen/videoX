@@ -10,6 +10,7 @@ from pathlib import Path
 from videox.errors import VideoXError
 from videox.paths import (
     bundled_ffmpeg,
+    deps_marker,
     flashvsr_dir,
     flashvsr_rev_file,
     project_root,
@@ -35,6 +36,21 @@ _SKIP_REQUIREMENTS = {
     "torchaudio",
     "block-sparse-attention",
     "block-sparse-attn",
+}
+# FlashVSR's requirements.txt also lists training-only packages that inference
+# never imports. It does not list modelscope, which diffsynth imports.
+_FLASHVSR_DROP = {"pandas", "matplotlib", "datasets", "torchmetrics", "pytorch-lightning", "torchsde", "peft"}
+_FLASHVSR_EXTRA = ("modelscope",)
+# Exact upstream pins with no wheels for Python 3.13 on Windows.
+_PY313_RELAXED = {
+    "numpy": "numpy>=1.26.4,<3",
+    "pillow": "pillow>=11.0.0",
+    "sentencepiece": "sentencepiece>=0.2.0",
+}
+# Imports that prove an engine venv can run, checked after setup.
+_ENGINE_IMPORTS = {
+    "FlashVSR": "import diffsynth, modelscope, imageio, einops",
+    "SwiftVR": "import swiftvr, diffusers, transformers, decord, imageio",
 }
 FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
 TORCH_INDEXES = (
@@ -156,16 +172,27 @@ def install_torch(python: str) -> None:
     raise last_error or VideoXError("无法安装带 CUDA 的 PyTorch")
 
 
-def _filter_requirements(requirements: Path, filtered: Path) -> None:
+def _filter_requirements(
+    requirements: Path,
+    filtered: Path,
+    *,
+    drop: set[str] | frozenset[str] = frozenset(),
+    replace: dict[str, str] | None = None,
+    extra: tuple[str, ...] = (),
+) -> None:
     filtered.parent.mkdir(parents=True, exist_ok=True)
     kept: list[str] = []
     for line in requirements.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         name = stripped.split("[", 1)[0].split("=", 1)[0].split("<", 1)[0].split(">", 1)[0].strip()
         normalized = name.lower().replace("_", "-")
-        if normalized in _SKIP_REQUIREMENTS:
+        if normalized in _SKIP_REQUIREMENTS or normalized in drop:
+            continue
+        if replace and normalized in replace:
+            kept.append(replace[normalized])
             continue
         kept.append(line)
+    kept.extend(extra)
     filtered.write_text("\n".join(kept) + "\n", encoding="utf-8")
 
 
@@ -181,6 +208,9 @@ def install_seedvr_requirements(root: Path, python: str) -> None:
 
 def install_engine_venv(root: Path, engine_dir: Path, label: str) -> str:
     python = venv_python(engine_dir)
+    if engine_dir.is_dir():
+        # Stays "missing" unless the import check at the end of setup passes.
+        deps_marker(engine_dir).write_text("missing\n", encoding="utf-8")
     if not python.exists():
         _say(f"正在为 {label} 创建虚拟环境")
         _run([sys.executable, "-m", "venv", str(engine_dir / ".venv")])
@@ -205,9 +235,29 @@ def install_engine_venv(root: Path, engine_dir: Path, label: str) -> str:
     requirements = engine_dir / "requirements.txt"
     if requirements.is_file():
         filtered = root / ".work" / f"{label.lower()}-requirements.txt"
-        _filter_requirements(requirements, filtered)
+        flash = label == "FlashVSR"
+        _filter_requirements(
+            requirements,
+            filtered,
+            drop=_FLASHVSR_DROP if flash else frozenset(),
+            replace=_PY313_RELAXED if sys.version_info >= (3, 13) else None,
+            extra=_FLASHVSR_EXTRA if flash else (),
+        )
         _run([str(python), "-m", "pip", "install", "-r", str(filtered)])
     return str(python)
+
+
+def check_engine_imports(engine_dir: Path, python: str, label: str) -> None:
+    """Record whether the engine venv can import what inference needs."""
+    probe = subprocess.run(
+        [python, "-c", _ENGINE_IMPORTS[label]],
+        cwd=str(engine_dir),
+        check=False,
+    )
+    ready = probe.returncode == 0
+    deps_marker(engine_dir).write_text("ready\n" if ready else "missing\n", encoding="utf-8")
+    if not ready:
+        raise VideoXError(f"{label} 的依赖没有装好，导入检查失败")
 
 
 def install_block_sparse(root: Path, python: str) -> None:
@@ -224,15 +274,17 @@ def install_block_sparse(root: Path, python: str) -> None:
         _run([python, "setup.py", "install"], cwd=destination)
     except VideoXError as exc:
         marker.write_text("missing\n", encoding="utf-8")
-        _say(f"Block-Sparse-Attention 编译失败，FlashVSR 将使用整块注意力: {exc}")
-        return
+        # diffsynth imports block_sparse_attn unconditionally, so FlashVSR cannot run without it.
+        raise VideoXError(
+            f"Block-Sparse-Attention 编译失败，FlashVSR 无法使用。请安装 CUDA Toolkit 后重新运行 videox setup: {exc}"
+        ) from exc
     probe = subprocess.run(
         [python, "-c", "import torch; import block_sparse_attn"],
         check=False,
     )
     marker.write_text("ready\n" if probe.returncode == 0 else "missing\n", encoding="utf-8")
     if probe.returncode != 0:
-        _say("Block-Sparse-Attention 没有导入成功，FlashVSR 将使用整块注意力。")
+        raise VideoXError("Block-Sparse-Attention 没有导入成功，FlashVSR 无法使用")
 
 
 def install_optional_engines(root: Path) -> None:
@@ -241,11 +293,13 @@ def install_optional_engines(root: Path) -> None:
         ensure_flashvsr(root)
         python = install_engine_venv(root, flashvsr_dir(root), "FlashVSR")
         install_block_sparse(root, python)
+        check_engine_imports(flashvsr_dir(root), python, "FlashVSR")
     except VideoXError as exc:
         errors.append(f"FlashVSR: {exc}")
     try:
         ensure_swiftvr(root)
-        install_engine_venv(root, swiftvr_dir(root), "SwiftVR")
+        python = install_engine_venv(root, swiftvr_dir(root), "SwiftVR")
+        check_engine_imports(swiftvr_dir(root), python, "SwiftVR")
     except VideoXError as exc:
         errors.append(f"SwiftVR: {exc}")
     if errors:

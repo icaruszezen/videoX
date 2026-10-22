@@ -60,7 +60,7 @@ export function FrameCompare({
   if (frame == null) {
     return (
       <p className="rounded-lg border border-dashed px-3 py-6 text-center text-sm text-muted-foreground">
-        成片会在后处理开始后出现
+        处理过程中会在这里显示对比画面（部分模型在结束时才生成）
       </p>
     )
   }

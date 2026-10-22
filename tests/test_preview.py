@@ -1,8 +1,10 @@
 from fastapi.testclient import TestClient
 
 from videox.engines.registry import EngineRegistry
+from videox.engines.seedvr2 import progress_entry
 from videox.engines.seedvr2.progress_entry import (
     PreviewCursor,
+    device_count,
     parse_preview_args,
     postprocess_batch_index,
 )
@@ -54,6 +56,43 @@ def test_cursor_does_not_subtract_prepend_twice_when_it_was_removed():
     assert cursor.segment_start == 6
     assert cursor.locate(0, 3) is None
     assert cursor.locate(3, 3) == (6, 7)
+
+
+class _Frames:
+    def __init__(self, count: int) -> None:
+        self.shape = (count, 2, 2, 3)
+
+    def __getitem__(self, index: slice) -> "_Frames":
+        return _Frames(len(range(self.shape[0])[index]))
+
+
+def test_single_gpu_parent_asks_upstream_to_drop_prepended_frames(monkeypatch):
+    seen = []
+
+    def postprocess(ctx, debug, progress_callback=None, prepend_frames=0, temporal_overlap=0):
+        seen.append(prepend_frames)
+        ctx["final_video"] = ctx["final_video"][prepend_frames:]
+        return ctx
+
+    state = progress_entry._PreviewState()
+    monkeypatch.setattr(progress_entry, "_state", state)
+    monkeypatch.delenv("VIDEOX_PREVIEW_DIR", raising=False)
+    progress_entry._configure_parent(["entry", "in.mp4", "--prepend_frames", "4", "--cuda_device", "1"])
+    wrapped = progress_entry._wrap_postprocess(postprocess)
+    # First chunk: 4 prepended + 10 real frames. Second: 3 context + 10 new frames.
+    wrapped(ctx={"final_video": _Frames(14)}, debug=None, prepend_frames=0, temporal_overlap=3)
+    wrapped(ctx={"final_video": _Frames(13)}, debug=None, prepend_frames=0, temporal_overlap=3)
+    assert seen == [4, 0]
+    assert state.cursor.segment_start == 20
+
+    progress_entry._configure_parent(["entry", "in.mp4", "--prepend_frames", "4", "--cuda_device", "0,1"])
+    assert state.strip_prepend is False
+
+
+def test_device_count_matches_upstream_split():
+    assert device_count(["entry", "in.mp4", "--cuda_device", "0,1"]) == 2
+    assert device_count(["entry", "in.mp4", "--cuda_device", "1"]) == 1
+    assert device_count(["entry", "in.mp4"]) == 1
 
 
 def test_batch_index_skips_the_alpha_pass():

@@ -31,6 +31,42 @@ def _stage_name(phase: str) -> str:
 
 
 def parse_seedvr2_line(line: str) -> LogInsight | None:
+    """Parse one line without per-job state; see SeedVR2LogParser for the bar."""
+    parsed = _parse(line)
+    if parsed is None:
+        return None
+    insight, _worker, _workers = parsed
+    return insight
+
+
+class SeedVR2LogParser:
+    """Turns SeedVR2's per-phase steps into one bar that only moves forward.
+
+    Each phase reports its own 0..N steps, streaming runs repeat all four
+    phases per chunk, and two GPU workers report at the same time. Every
+    worker gets an equal share of the bar, filled chunk by chunk.
+    """
+
+    def __init__(self) -> None:
+        self._done: dict[int, float] = {}
+        self._workers = 1
+        self._progress = 0.0
+
+    def __call__(self, line: str) -> LogInsight | None:
+        parsed = _parse(line)
+        if parsed is None:
+            return None
+        insight, worker, workers = parsed
+        if insight.progress is None or worker is None:
+            return insight
+        self._workers = max(self._workers, workers)
+        self._done[worker] = max(self._done.get(worker, 0.0), insight.progress)
+        overall = sum(self._done.values()) / self._workers
+        self._progress = max(self._progress, min(overall, 1.0))
+        return LogInsight(stage=insight.stage, progress=self._progress)
+
+
+def _parse(line: str) -> tuple[LogInsight, int | None, int] | None:
     text = line.strip()
     if not text:
         return None
@@ -41,26 +77,28 @@ def parse_seedvr2_line(line: str) -> LogInsight | None:
             return None
         if frame < 1:
             return None
-        return LogInsight(preview_frame=frame)
+        return LogInsight(preview_frame=frame), None, 1
     if text.startswith("{") and "videox_progress" in text:
         try:
             payload = json.loads(text)["videox_progress"]
             phase = str(payload.get("phase") or "")
             current = float(payload.get("current") or 0)
             total = float(payload.get("total") or 0)
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            worker = int(payload.get("worker") or 0)
+            workers = max(1, int(payload.get("workers") or 1))
+            chunks = max(1, int(payload.get("chunks") or 1))
+            chunk = min(max(1, int(payload.get("chunk") or 1)), chunks)
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError):
             return None
         progress = None
         if total > 0:
             base, span = _phase_range(phase)
-            progress = base + span * (current / total)
-        return LogInsight(stage=_stage_name(phase), progress=progress)
-    chunk = _CHUNK.search(text)
-    if chunk:
-        current = int(chunk.group(1))
-        total = int(chunk.group(2))
-        progress = current / total if total else None
-        return LogInsight(stage="chunk", progress=progress)
+            within = base + span * min(current / total, 1.0)
+            progress = (chunk - 1 + within) / chunks
+        return LogInsight(stage=_stage_name(phase), progress=progress), worker, workers
+    if _CHUNK.search(text):
+        # The JSON progress lines already account for chunks.
+        return LogInsight(stage="chunk"), None, 1
     if "Output saved to" in text or "All upscaling processes completed" in text:
-        return LogInsight(stage="save", progress=1.0)
+        return LogInsight(stage="save", progress=1.0), None, 1
     return None

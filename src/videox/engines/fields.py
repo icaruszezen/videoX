@@ -39,6 +39,7 @@ def integer_field(
     description: str,
     minimum: int = 0,
     maximum: int | None = None,
+    step: int | None = None,
     media: list[str] = VIDEO,
 ) -> dict:
     field: dict = {
@@ -52,6 +53,9 @@ def integer_field(
     }
     if maximum is not None:
         field["maximum"] = maximum
+    if step is not None:
+        # Valid values are minimum + k * step; the UI uses it for the spinner and checks.
+        field["step"] = step
     return field
 
 

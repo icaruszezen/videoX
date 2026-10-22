@@ -9,13 +9,14 @@ from videox.engines.swiftvr.logs import parse_swiftvr_line
 from videox.engines.swiftvr.presets import (
     DEFAULT_CLIP_LEN,
     DEFAULT_DTYPE,
+    DEFAULT_SHORT_SIDE,
     DEFAULT_UPSCALE,
     DTYPE_CHOICES,
     params_schema,
 )
 from videox.errors import VideoXError
 from videox.jobs.models import EngineManifest, JobSpec
-from videox.paths import swiftvr_dir, venv_python, weights_dir
+from videox.paths import engine_venv_ready, swiftvr_dir, venv_python, weights_dir
 
 
 class SwiftVREngine:
@@ -25,7 +26,7 @@ class SwiftVREngine:
         return EngineManifest(
             id=self.id,
             name="SwiftVR",
-            description="一步生成式修复，面向实时超分。权重是研究许可：个人本地使用可以，商用需要作者书面授权。只使用一张显卡。",
+            description="一步生成式修复，面向实时超分。权重是研究许可：个人本地使用可以，商用需要作者书面授权。只使用一张显卡。按官方实现只处理 4n+1 帧（末尾最多少 3 帧，音轨随之截短），画面宽高会向下裁到 8 的倍数。",
             capabilities=["upscale"],
             media=["video"],
             device_policy="single",
@@ -36,9 +37,12 @@ class SwiftVREngine:
         return weights_dir("SwiftVR", root)
 
     def resolve_python(self, ctx: EngineContext) -> str:
-        python = venv_python(swiftvr_dir(ctx.project_root))
+        root = swiftvr_dir(ctx.project_root)
+        python = venv_python(root)
         if not python.is_file():
             raise VideoXError("SwiftVR 还没有安装。请运行 videox setup。")
+        if not engine_venv_ready(root):
+            raise VideoXError("SwiftVR 的依赖没有装好。请重新运行 videox setup。")
         return str(python)
 
     def working_directory(self, ctx: EngineContext) -> Path | None:
@@ -66,8 +70,11 @@ class SwiftVREngine:
         if clip_len % 4 != 0:
             raise VideoXError(f"分块长度必须是 4 的倍数，当前是 {clip_len}")
         dtype = _choice(_as_str(params.get("dtype", DEFAULT_DTYPE), "精度"), DTYPE_CHOICES, "精度")
+        short_side = _as_int(params.get("short_side", DEFAULT_SHORT_SIDE), "输出短边", 0, 4320)
+        if 0 < short_side < 64:
+            raise VideoXError("输出短边至少 64 像素，或填 0 按倍数输出")
         device = chosen_device(job, ctx)
-        return [
+        command = [
             ctx.python_executable,
             "-u",
             "-m",
@@ -86,6 +93,9 @@ class SwiftVREngine:
             "--device",
             str(device),
         ]
+        if short_side > 0:
+            command.extend(["--short-side", str(short_side - short_side % 2)])
+        return command
 
 
 def _as_int(value: object, label: str, low: int, high: int) -> int:
