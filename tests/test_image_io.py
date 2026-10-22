@@ -117,7 +117,12 @@ def test_images_round_trip_with_alpha(tmp_path: Path):
     pytest.importorskip("PIL")
     from PIL import Image
 
-    from videox.engines.image_io import StillImage, read_image, resize_plane, write_image
+    from videox.engines.image_io import (
+        StillImage,
+        read_image,
+        resize_plane,
+        write_image,
+    )
 
     rgba = np.zeros((6, 8, 4), dtype=np.uint8)
     rgba[..., 0] = 200
@@ -147,3 +152,53 @@ def test_images_round_trip_with_alpha(tmp_path: Path):
     assert int(read_image(deep).rgb.min()) == 255
     with pytest.raises(VideoXError, match="不支持"):
         write_image(tmp_path / "out.gif", image)
+
+
+def test_sixteen_bit_transparency_and_colour_profile(tmp_path: Path):
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("torch")
+    pytest.importorskip("PIL")
+    from PIL import Image, ImageCms
+
+    from videox.engines.image_io import read_image, write_image
+
+    # A dark 16-bit scan stays dark: 16-bit modes always span 0..65535.
+    dark = tmp_path / "dark.png"
+    Image.fromarray(np.full((4, 4), 200, dtype=np.uint16)).save(dark)
+    assert int(read_image(dark).rgb.max()) == 1
+
+    # A tRNS colour key on an RGB PNG becomes real alpha.
+    keyed = tmp_path / "keyed.png"
+    rgb = np.full((4, 6, 3), 90, np.uint8)
+    rgb[:, :3] = 0
+    Image.fromarray(rgb).save(keyed, transparency=(0, 0, 0))
+    image = read_image(keyed)
+    assert image.alpha is not None and image.alpha[:, :3].max() == 0 and image.alpha[:, 3:].min() == 255
+
+    # The input's ICC profile is written back where the format can hold one.
+    profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    tagged = tmp_path / "tagged.jpg"
+    Image.fromarray(rgb).save(tagged, icc_profile=profile)
+    image = read_image(tagged)
+    assert image.icc_profile == profile
+    for name in ("out.png", "out.jpg", "out.webp", "out.tif"):
+        write_image(tmp_path / name, image)
+        with Image.open(tmp_path / name) as written:
+            assert written.info.get("icc_profile") == profile
+
+
+def test_output_size_limits_are_checked_up_front(tmp_path: Path):
+    pytest.importorskip("numpy")
+    pytest.importorskip("torch")
+    pytest.importorskip("PIL")
+    from videox.engines.image_io import check_output_size
+
+    check_output_size(tmp_path / "a.webp", 16383, 100)
+    with pytest.raises(VideoXError, match="WEBP 图片每边最多 16383 像素，这次成品是 100x16384"):
+        check_output_size(tmp_path / "a.webp", 100, 16384)
+    check_output_size(tmp_path / "a.jpg", 65500, 10)
+    with pytest.raises(VideoXError, match="JPG 图片每边最多 65500 像素"):
+        check_output_size(tmp_path / "a.jpg", 65501, 10)
+    check_output_size(tmp_path / "a.png", 70000, 70000)
+    with pytest.raises(VideoXError, match="不支持的图片格式"):
+        check_output_size(tmp_path / "a.gif", 10, 10)

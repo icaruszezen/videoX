@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from videox.cli import default_restore_output, restore_params
+from videox.cli import default_restore_output, engine_params, restore_params
 from videox.engines.base import EngineContext
 from videox.engines.flashvsr.engine import FlashVSREngine
 from videox.engines.progress import parse_engine_line
@@ -133,6 +133,20 @@ def test_restore_flags_stay_on_seedvr2(tmp_path: Path):
     assert default_restore_output(tmp_path, source, "seedvr2", "image").name == "clip.seedvr2.png"
     assert restore_params("flashvsr", 720, 5) == {}
     assert restore_params("seedvr2", 720, 5) == {"resolution": 720, "batch_size": 5}
+
+
+def test_param_flags_are_typed_by_the_engine_schema():
+    assert engine_params("gfpgan", []) == {}
+    typed = engine_params(
+        "gfpgan", ["upscale=4", "strength=0.5", "tile=256", "fp16=false", "background=none"]
+    )
+    assert typed == {"upscale": "4", "strength": 0.5, "tile": 256, "fp16": False, "background": "none"}
+    with pytest.raises(VideoXError, match="没有参数 nope"):
+        engine_params("swinir", ["nope=1"])
+    with pytest.raises(VideoXError, match="tile 的值无法识别"):
+        engine_params("swinir", ["tile=big"])
+    with pytest.raises(VideoXError, match="fp16 的值无法识别"):
+        engine_params("realesrgan", ["fp16=yes"])
 
 
 def test_progress_lines_parse():

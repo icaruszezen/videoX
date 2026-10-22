@@ -31,14 +31,19 @@ _FORMATS = {
     ".tiff": "TIFF",
 }
 _ALPHA_FORMATS = {"PNG", "WEBP", "TIFF"}
+_ICC_FORMATS = {"PNG", "JPEG", "WEBP", "TIFF"}
+# Largest side each format can store; Pillow only fails once the whole result is ready.
+_MAX_SIDE = {"JPEG": 65500, "WEBP": 16383}
+_SIXTEEN_BIT = {"I;16", "I;16B", "I;16L", "I;16N"}
 
 
 @dataclass
 class StillImage:
-    """An 8-bit RGB image and, when it has real transparency, its alpha plane."""
+    """An 8-bit RGB image, its alpha plane when it has real transparency, and its colour profile."""
 
     rgb: np.ndarray
     alpha: np.ndarray | None = None
+    icc_profile: bytes | None = None
 
     @property
     def width(self) -> int:
@@ -69,24 +74,28 @@ def read_image(path: Path) -> StillImage:
             image = ImageOps.exif_transpose(opened)
     except OSError as exc:
         raise VideoXError(f"无法读取图片 {path.name}: {exc}") from exc
-    if image.mode in {"I", "I;16", "I;16B", "I;16L", "I;16N", "F"}:
-        image = Image.fromarray(_to_uint8(np.asarray(image)))
-    has_alpha = "A" in image.getbands() or (image.mode == "P" and "transparency" in image.info)
-    if has_alpha:
+    icc_profile = image.info.get("icc_profile") or None
+    if image.mode in _SIXTEEN_BIT or image.mode in {"I", "F"}:
+        image = Image.fromarray(_to_uint8(np.asarray(image), sixteen_bit=image.mode in _SIXTEEN_BIT))
+    # "transparency" covers palette images and the tRNS colour key of grey and RGB PNGs.
+    if "A" in image.getbands() or "transparency" in image.info:
         rgba = np.asarray(image.convert("RGBA"))
         rgb = np.array(rgba[..., :3])
         alpha = np.array(rgba[..., 3])
         if int(alpha.min()) == 255:
             alpha = None
-        return StillImage(rgb, alpha)
+        return StillImage(rgb, alpha, icc_profile)
     # np.array copies: Pillow's own buffer is read-only and torch warns about those.
-    return StillImage(np.array(image.convert("RGB")))
+    return StillImage(np.array(image.convert("RGB")), icc_profile=icc_profile)
 
 
-def _to_uint8(array: np.ndarray) -> np.ndarray:
+def _to_uint8(array: np.ndarray, *, sixteen_bit: bool) -> np.ndarray:
+    """16-bit modes always span 0..65535; 32-bit "I" and "F" images are judged by their peak."""
     data = array.astype(np.float64)
     peak = float(data.max()) if data.size else 0.0
-    if peak > 255:
+    if sixteen_bit:
+        data = data * (255.0 / 65535.0)
+    elif peak > 255:
         data = data * (255.0 / (65535.0 if peak <= 65535 else peak))
     elif 0 < peak <= 1.0 and array.dtype.kind == "f":
         data = data * 255.0
@@ -99,6 +108,17 @@ def check_output_format(path: Path) -> str:
     if fmt is None:
         raise VideoXError(f"不支持的图片格式: {path.suffix or path.name}")
     return fmt
+
+
+def check_output_size(path: Path, width: int, height: int) -> None:
+    """Fail before inference when the planned result is too large for the output format."""
+    fmt = check_output_format(path)
+    limit = _MAX_SIDE.get(fmt)
+    if limit is not None and max(width, height) > limit:
+        raise VideoXError(
+            f"{path.suffix.lstrip('.').upper()} 图片每边最多 {limit} 像素，这次成品是 {width}x{height}，"
+            "请改存 PNG 或 TIFF，或调小倍数"
+        )
 
 
 def write_image(path: Path, image: StillImage) -> None:
@@ -116,14 +136,26 @@ def write_image(path: Path, image: StillImage) -> None:
         options = {"quality": 95, "subsampling": 0}
     elif fmt == "WEBP":
         options = {"quality": 95, "method": 4}
+    if image.icc_profile and fmt in _ICC_FORMATS:
+        options["icc_profile"] = image.icc_profile
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(path.name + ".part")
     try:
         picture.save(partial, format=fmt, **options)
         partial.replace(path)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # Pillow reports some encoder limits (WebP size, for one) as ValueError.
         partial.unlink(missing_ok=True)
         raise VideoXError(f"写出图片失败 {path.name}: {exc}") from exc
+
+
+def save_result(path: Path, source: StillImage, rgb: np.ndarray) -> None:
+    """Write the processed RGB with the source's alpha (resized to fit) and profile, then the preview."""
+    alpha = None
+    if source.alpha is not None:
+        alpha = resize_plane(source.alpha, int(rgb.shape[1]), int(rgb.shape[0]))
+    write_image(path, StillImage(rgb, alpha, source.icc_profile))
+    publish_preview(source, rgb)
 
 
 def resize_plane(array: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -215,7 +247,26 @@ def run_tiled(
     into ``tile``-sized blocks, each read with ``tile_pad`` pixels of context on
     every side; only the centre of each result is kept, so seams stay hidden.
     The output is assembled on the CPU to keep large results out of VRAM.
+    Running out of VRAM is reported as a VideoXError that suggests a smaller tile.
     """
+    try:
+        return _run_tiled(
+            model, image, scale=scale, tile=tile, tile_pad=tile_pad, multiple_of=multiple_of, phase=phase
+        )
+    except torch.cuda.OutOfMemoryError as exc:
+        raise VideoXError("显存不足，请调小分块大小后重试") from exc
+
+
+def _run_tiled(
+    model: Callable[[torch.Tensor], torch.Tensor],
+    image: torch.Tensor,
+    *,
+    scale: int,
+    tile: int,
+    tile_pad: int,
+    multiple_of: int,
+    phase: str,
+) -> np.ndarray:
     _batch, _channels, height, width = image.shape
     if tile <= 0 or (height <= tile and width <= tile):
         emit_progress(phase, 0, 1)

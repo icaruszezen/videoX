@@ -327,7 +327,7 @@ def test_released_gfpgan_config_has_checkpoint_layout():
 def test_retinaface_shapes_and_priors():
     torch = pytest.importorskip("torch")
     np = pytest.importorskip("numpy")
-    from videox.engines.gfpgan.arch import RetinaFace, nms, prior_box
+    from videox.engines.gfpgan.arch import RetinaFace, prior_box
 
     torch.manual_seed(0)
     network = RetinaFace().eval()
@@ -352,30 +352,6 @@ def test_retinaface_shapes_and_priors():
                 for size in sizes:
                     expected += [(j + 0.5) * step / width, (i + 0.5) * step / height, size / width, size / height]
     assert torch.equal(prior_box(height, width), torch.Tensor(expected).view(-1, 4))
-
-    dets = np.array(
-        [
-            [0, 0, 10, 10, 0.99],
-            [1, 1, 11, 11, 0.98],  # IoU 0.68 with the first: dropped
-            [20, 20, 30, 30, 0.97],
-            [0, 0, 10, 4, 0.96],  # IoU 0.4 with the first: kept (not above the threshold)
-        ],
-        dtype=np.float32,
-    )
-    assert nms(dets, 0.4).tolist() == [0, 2, 3]
-    assert nms(dets[:0], 0.4).tolist() == []
-
-
-def test_resnet_backbone_matches_torchvision_names():
-    pytest.importorskip("torch")
-    models = pytest.importorskip("torchvision.models")
-    from videox.engines.gfpgan.arch import ResNet50Body
-
-    ours = ResNet50Body().state_dict()
-    full = models.resnet50(weights=None).state_dict()
-    reference = {key: value for key, value in full.items() if not key.startswith("fc.")}
-    assert list(ours) == list(reference)
-    assert all(ours[key].shape == reference[key].shape for key in ours)
 
 
 def _synthetic_landmarks(scale: float, left: float, top: float):
@@ -449,16 +425,67 @@ def test_detect_faces_filters_and_rescales():
     assert np.allclose(shrunk[0].landmarks[0], [40, 50])
 
 
-def test_blend_face_mixes_with_the_original():
+def _full_frame_paste(background, faces, inverses, *, input_size, upscale):
+    """facexlib's square-mask paste-back, warping every face over the whole frame."""
+    import cv2
+    import numpy as np
+
+    height, width = input_size
+    h_up, w_up = int(height * upscale), int(width * upscale)
+    image = cv2.resize(background, (w_up, h_up), interpolation=cv2.INTER_LANCZOS4)
+    for face, matrix in zip(faces, inverses, strict=True):
+        matrix = matrix.copy()
+        if upscale > 1:
+            matrix[:, 2] += 0.5 * upscale
+        inv_restored = cv2.warpAffine(face, matrix, (w_up, h_up))
+        inv_mask = cv2.warpAffine(np.ones((512, 512), np.float32), matrix, (w_up, h_up))
+        erosion = cv2.erode(inv_mask, np.ones((int(2 * upscale), int(2 * upscale)), np.uint8))
+        pasted = erosion[:, :, None] * inv_restored
+        w_edge = int(np.sum(erosion) ** 0.5) // 20
+        center = cv2.erode(erosion, np.ones((w_edge * 2, w_edge * 2), np.uint8))
+        soft = cv2.GaussianBlur(center, (w_edge * 2 + 1, w_edge * 2 + 1), 0)[:, :, None]
+        image = soft * pasted + (1 - soft) * image
+    return np.clip(image, 0, 255).astype(np.uint8)
+
+
+@pytest.mark.parametrize("upscale", [1, 2, 4])
+def test_paste_faces_matches_full_frame_paste(upscale: int):
     pytest.importorskip("torch")
     np = pytest.importorskip("numpy")
-    from videox.engines.gfpgan.infer import blend_face
+    pytest.importorskip("cv2")
+    from videox.engines.gfpgan.faces import align_face, inverse_affine, paste_faces
 
-    restored = np.full((4, 4, 3), 200, np.uint8)
-    original = np.full((4, 4, 3), 100, np.uint8)
-    assert blend_face(restored, original, 1.0) is restored
-    assert blend_face(restored, original, 0.0).tolist() == original.tolist()
-    assert int(blend_face(restored, original, 0.25)[0, 0, 0]) == 125
+    rng = np.random.default_rng(upscale)
+    image = rng.integers(0, 256, size=(150, 170, 3), dtype=np.uint8)
+    faces, inverses = [], []
+    # One face inside, one cut by the top-left corner, one overlapping the first.
+    for scale, left, top in ((0.2, 50, 40), (0.15, -20, -15), (0.18, 70, 55)):
+        matrix, _cropped = align_face(image, _synthetic_landmarks(scale, left, top))
+        faces.append(rng.integers(0, 256, size=(512, 512, 3), dtype=np.uint8))
+        inverses.append(inverse_affine(matrix, upscale))
+    expected = _full_frame_paste(image, faces, inverses, input_size=(150, 170), upscale=upscale)
+    pasted = paste_faces(image, faces, inverses, input_size=(150, 170), upscale=upscale)
+    assert pasted.shape == expected.shape and pasted.dtype == np.uint8
+    # Only rounding differs: each face is truncated to 8 bits before the next one blends.
+    assert np.abs(pasted.astype(int) - expected.astype(int)).max() <= 2
+
+
+def test_paste_faces_strength_scales_the_mask():
+    pytest.importorskip("torch")
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    from videox.engines.gfpgan.faces import align_face, inverse_affine, paste_faces
+
+    background = np.full((200, 220, 3), 40, np.uint8)
+    matrix, _cropped = align_face(background, _synthetic_landmarks(0.25, 40, 30))
+    face = np.full((512, 512, 3), 240, np.uint8)
+    inverses = [inverse_affine(matrix, 2)]
+    kept = paste_faces(background, [face], inverses, input_size=(200, 220), upscale=2, strength=0)
+    assert kept.tolist() == np.full((400, 440, 3), 40, np.uint8).tolist()
+    half = paste_faces(background, [face], inverses, input_size=(200, 220), upscale=2, strength=0.5)
+    assert abs(int(half[200, 230, 0]) - 140) <= 1
+    full = paste_faces(background, [face], inverses, input_size=(200, 220), upscale=2)
+    assert full[200, 230].min() >= 239
 
 
 def test_pipeline_runs_with_tiny_networks(tmp_path: Path, monkeypatch, capsys):
@@ -518,16 +545,29 @@ def test_pipeline_runs_with_tiny_networks(tmp_path: Path, monkeypatch, capsys):
     )
     with Image.open(plain) as written:
         assert written.mode == "RGB" and written.size == (120, 90)
-    assert "没有检测到人脸" in capsys.readouterr().out
+    assert "没有修复任何人脸" in capsys.readouterr().out
+
+    # Strength 0 keeps the background, so no face network runs.
+    calls.clear()
+    background_only = tmp_path / "background.png"
+    infer.run_gfpgan(
+        infer.GFPGANRequest(
+            input_path=source, output_path=background_only, model_dir=tmp_path, background=NO_BACKGROUND,
+            upscale=1, strength=0,
+        )
+    )
+    assert calls == [] and '"phase": "face"' not in capsys.readouterr().out
+    with Image.open(background_only) as written:
+        assert np.asarray(written)[..., :3].tolist() == rgb.tolist()
 
     with pytest.raises(VideoXError, match="不支持的图片格式"):
         infer.run_gfpgan(infer.GFPGANRequest(input_path=source, output_path=tmp_path / "x.gif", model_dir=tmp_path))
-    with pytest.raises(VideoXError, match="放大倍数"):
-        infer.run_gfpgan(infer.GFPGANRequest(input_path=source, output_path=out, model_dir=tmp_path, upscale=3))
-    with pytest.raises(VideoXError, match="背景处理"):
+    wide = tmp_path / "wide.png"
+    Image.fromarray(np.zeros((2, 4100, 3), np.uint8)).save(wide)
+    with pytest.raises(VideoXError, match="WEBP 图片每边最多 16383 像素"):
+        infer.run_gfpgan(infer.GFPGANRequest(input_path=wide, output_path=tmp_path / "x.webp", model_dir=tmp_path, upscale=4))
+    with pytest.raises(VideoXError, match="未知的 Real-ESRGAN 模型"):
         infer.run_gfpgan(infer.GFPGANRequest(input_path=source, output_path=out, model_dir=tmp_path, background="x"))
-    with pytest.raises(VideoXError, match="人脸修复强度"):
-        infer.run_gfpgan(infer.GFPGANRequest(input_path=source, output_path=out, model_dir=tmp_path, strength=2))
     assert infer.background_dir(tmp_path / "models" / "GFPGAN") == tmp_path / "models" / "RealESRGAN"
 
 

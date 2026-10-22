@@ -13,17 +13,15 @@ import numpy as np
 import torch
 
 from videox.engines.image_io import (
-    StillImage,
-    check_output_format,
+    check_output_size,
     load_state_dict,
     pick_device,
-    publish_preview,
     read_image,
     resize_plane,
     run_tiled,
+    save_result,
     scaled_size,
     to_tensor,
-    write_image,
 )
 from videox.engines.progress import emit_progress
 from videox.engines.realesrgan.arch import build_network
@@ -56,69 +54,55 @@ class RealESRGANRequest:
 def run_realesrgan(request: RealESRGANRequest) -> None:
     spec = model_spec(request.model_id)
     outscale = float(spec.scale if request.outscale is None else request.outscale)
-    check_output_format(request.output_path)
     source = read_image(request.input_path)
+    check_output_size(request.output_path, *scaled_size(source.width, source.height, outscale))
     device = pick_device()
-    rgb = upscale_rgb(
-        source.rgb,
-        model_id=request.model_id,
-        model_dir=request.model_dir,
+    emit_progress("download", 0, 1)
+    paths = ensure_model(request.model_dir, request.model_id, denoise_strength=request.denoise_strength)
+    emit_progress("download", 1, 1)
+    emit_progress("load", 0, 1)
+    model = load_model(
+        request.model_id,
+        paths,
         device=device,
         half=request.half,
+        denoise_strength=request.denoise_strength,
+    )
+    emit_progress("load", 1, 1)
+    rgb = upscale_rgb(
+        model,
+        source.rgb,
+        model_id=request.model_id,
         tile=request.tile,
         tile_pad=request.tile_pad,
         outscale=outscale,
-        denoise_strength=request.denoise_strength,
     )
-    alpha = None
-    if source.alpha is not None:
-        alpha = resize_plane(source.alpha, int(rgb.shape[1]), int(rgb.shape[0]))
-    write_image(request.output_path, StillImage(rgb, alpha))
-    publish_preview(source, rgb)
+    save_result(request.output_path, source, rgb)
 
 
 def upscale_rgb(
+    model: torch.nn.Module,
     rgb: np.ndarray,
     *,
     model_id: str,
-    model_dir: Path,
-    device: torch.device,
-    half: bool,
     tile: int,
     tile_pad: int,
     outscale: float,
-    denoise_strength: float = 0.5,
     phase: str = "restore",
 ) -> np.ndarray:
-    """Upscale HxWx3 uint8 RGB and return round(w*outscale) x round(h*outscale) RGB.
-
-    Downloads the weights on first use. Nothing is cached between calls.
-    """
+    """Run a loaded model over HxWx3 uint8 RGB and return round(w*outscale) x round(h*outscale) RGB."""
     spec = model_spec(model_id)
-    _check_settings(tile, tile_pad, outscale, denoise_strength)
-    if rgb.ndim != 3 or rgb.shape[2] != 3 or rgb.shape[0] < 1 or rgb.shape[1] < 1:
-        raise VideoXError("Real-ESRGAN 需要 RGB 图片")
-    emit_progress("download", 0, 1)
-    paths = ensure_model(model_dir, model_id, denoise_strength=denoise_strength)
-    emit_progress("download", 1, 1)
-    half = half and device.type == "cuda"
-    emit_progress("load", 0, 1)
-    model = load_model(model_id, paths, device=device, half=half, denoise_strength=denoise_strength)
-    emit_progress("load", 1, 1)
     height, width = int(rgb.shape[0]), int(rgb.shape[1])
-    try:
-        image = to_tensor(rgb, device, torch.float16 if half else torch.float32)
-        output = run_tiled(
-            model,
-            image,
-            scale=spec.scale,
-            tile=tile,
-            tile_pad=tile_pad,
-            multiple_of=spec.multiple_of,
-            phase=phase,
-        )
-    except torch.cuda.OutOfMemoryError as exc:
-        raise VideoXError("显存不足，请把分块大小调小后重试") from exc
+    parameter = next(model.parameters())
+    output = run_tiled(
+        model,
+        to_tensor(rgb, parameter.device, parameter.dtype),
+        scale=spec.scale,
+        tile=tile,
+        tile_pad=tile_pad,
+        multiple_of=spec.multiple_of,
+        phase=phase,
+    )
     return resize_plane(output, *scaled_size(width, height, outscale))
 
 
@@ -130,7 +114,10 @@ def load_model(
     half: bool,
     denoise_strength: float = DEFAULT_DENOISE_STRENGTH,
 ) -> torch.nn.Module:
-    """Build the network and load ``paths`` (a second path is blended in by denoise strength)."""
+    """Build the network and load ``paths`` (a second path is blended in by denoise strength).
+
+    ``half`` only takes effect on CUDA; the CPU always runs in float32.
+    """
     spec = model_spec(model_id)
     state = load_state_dict(paths[0])
     if len(paths) > 1:
@@ -141,7 +128,7 @@ def load_model(
     except RuntimeError as exc:
         raise VideoXError(f"{paths[0].name} 和 {spec.label} 网络对不上，请删除该文件后重试") from exc
     network.eval().to(device)
-    if half:
+    if half and device.type == "cuda":
         network.half()
     return network
 
@@ -157,13 +144,3 @@ def dni(
     weight_b = 1 - weight_a
     return {key: weight_a * value + weight_b * state_b[key] for key, value in state_a.items()}
 
-
-def _check_settings(tile: int, tile_pad: int, outscale: float, denoise_strength: float) -> None:
-    if tile < 0:
-        raise VideoXError("分块大小不能小于 0")
-    if tile_pad < 0:
-        raise VideoXError("分块重叠不能小于 0")
-    if not outscale > 0:
-        raise VideoXError("输出倍数需要大于 0")
-    if not 0 <= denoise_strength <= 1:
-        raise VideoXError("去噪强度需要在 0 到 1 之间")

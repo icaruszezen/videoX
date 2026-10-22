@@ -6,7 +6,12 @@ import argparse
 import os
 from pathlib import Path
 
-from videox.engines.scunet.presets import DEFAULT_MODEL, DEFAULT_STRENGTH, DEFAULT_TILE, DEFAULT_TILE_PAD
+from videox.engines.scunet.presets import (
+    DEFAULT_MODEL,
+    DEFAULT_STRENGTH,
+    DEFAULT_TILE,
+    DEFAULT_TILE_PAD,
+)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -64,6 +64,8 @@ class MainImageEngine:
             "PYTHONUNBUFFERED": "1",
             "PYTHONIOENCODING": "utf-8",
             "PYTHONPATH": os.pathsep.join(parts),
+            # Device numbers come from nvidia-smi, which counts cards in PCI bus order.
+            "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         }
 
     def parse_log_line(self, line: str) -> LogInsight | None:

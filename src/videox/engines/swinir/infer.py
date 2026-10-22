@@ -9,21 +9,19 @@ from pathlib import Path
 import torch
 
 from videox.engines.image_io import (
-    StillImage,
-    check_output_format,
+    check_output_size,
     load_state_dict,
     pick_device,
-    publish_preview,
     read_image,
     resize_plane,
     run_tiled,
+    save_result,
     scaled_size,
     to_tensor,
-    write_image,
 )
 from videox.engines.progress import emit_progress
 from videox.engines.swinir.arch import SwinIR
-from videox.engines.swinir.presets import MAX_OUTSCALE, SwinIRModel, model_spec
+from videox.engines.swinir.presets import SwinIRModel, model_spec
 from videox.engines.swinir.weights import ensure_model
 from videox.errors import VideoXError
 
@@ -41,13 +39,10 @@ class SwinIRRequest:
 
 def run_swinir(request: SwinIRRequest) -> None:
     spec = model_spec(request.model)
-    if request.tile < 0 or request.tile_pad < 0:
-        raise VideoXError("分块大小和分块重叠不能是负数")
     outscale = float(request.outscale) if request.outscale is not None else float(spec.scale)
-    if not 1 <= outscale <= MAX_OUTSCALE:
-        raise VideoXError(f"输出倍数需要在 1 到 {MAX_OUTSCALE} 之间")
-    check_output_format(request.output_path)
     source = read_image(request.input_path)
+    width, height = scaled_size(source.width, source.height, outscale)
+    check_output_size(request.output_path, width, height)
     emit_progress("download", 0, 1)
     (checkpoint,) = ensure_model(request.model_dir, spec.id)
     emit_progress("download", 1, 1)
@@ -55,21 +50,14 @@ def run_swinir(request: SwinIRRequest) -> None:
     device = pick_device()
     model = load_model(checkpoint, spec, device)
     emit_progress("load", 1, 1)
-    try:
-        restored = run_tiled(
-            mirror_padded(model, spec.window_size),
-            to_tensor(source.rgb, device),
-            scale=spec.scale,
-            tile=request.tile,
-            tile_pad=request.tile_pad,
-        )
-    except torch.cuda.OutOfMemoryError as exc:
-        raise VideoXError("显存不足，请调小分块大小后重试") from exc
-    width, height = scaled_size(source.width, source.height, outscale)
-    restored = resize_plane(restored, width, height)
-    alpha = resize_plane(source.alpha, width, height) if source.alpha is not None else None
-    write_image(request.output_path, StillImage(restored, alpha))
-    publish_preview(source, restored)
+    restored = run_tiled(
+        mirror_padded(model, spec.window_size),
+        to_tensor(source.rgb, device),
+        scale=spec.scale,
+        tile=request.tile,
+        tile_pad=request.tile_pad,
+    )
+    save_result(request.output_path, source, resize_plane(restored, width, height))
 
 
 def build_model(spec: SwinIRModel) -> SwinIR:

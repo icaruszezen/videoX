@@ -6,7 +6,13 @@ import pytest
 from videox.engines.base import EngineContext
 from videox.engines.registry import EngineRegistry
 from videox.engines.swinir import SwinIREngine
-from videox.engines.swinir.presets import DEFAULT_MODEL, MODELS, RELEASE_URL, SR_MODELS, model_spec
+from videox.engines.swinir.presets import (
+    DEFAULT_MODEL,
+    MODELS,
+    RELEASE_URL,
+    SR_MODELS,
+    model_spec,
+)
 from videox.engines.swinir.weights import ensure_model, known_files, weight_lists
 from videox.errors import VideoXError
 from videox.hardware.gpus import GpuInfo
@@ -24,10 +30,10 @@ RELEASE_LAYOUT = {
     "denoise_15": (544, (256, 64, 64)),
     "denoise_25": (544, (256, 64, 64)),
     "denoise_50": (544, (256, 64, 64)),
-    "jpeg_10": (544, (324, 49, 49)),
-    "jpeg_20": (544, (324, 49, 49)),
-    "jpeg_30": (544, (324, 49, 49)),
     "jpeg_40": (544, (324, 49, 49)),
+    "jpeg_30": (544, (324, 49, 49)),
+    "jpeg_20": (544, (324, 49, 49)),
+    "jpeg_10": (544, (324, 49, 49)),
 }
 
 
@@ -385,10 +391,6 @@ def test_pipeline_runs_with_local_weights(tmp_path: Path, monkeypatch: pytest.Mo
         run_swinir(request(output_path=tmp_path / "x.gif"))
     with pytest.raises(VideoXError, match="未知的 SwinIR 模型"):
         run_swinir(request(model="nope"))
-    with pytest.raises(VideoXError, match="输出倍数"):
-        run_swinir(request(outscale=9.0))
-    with pytest.raises(VideoXError, match="不能是负数"):
-        run_swinir(request(tile=-1))
 
 
 @pytest.mark.parametrize("model_id", list(MODELS))

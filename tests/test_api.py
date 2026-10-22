@@ -69,4 +69,4 @@ def test_engines_and_missing_input(tmp_path, monkeypatch):
     image_status = {item["id"]: item for item in payload["engines"][4:]}
     assert all(item["builtin"] for item in image_status.values())
     assert image_status["realesrgan"]["models_missing"] == ["RealESRGAN_x4plus.pth"]
-    assert not any("Real-ESRGAN" in warning or "GFPGAN" in warning for warning in payload["warnings"])
+    assert "Real-ESRGAN 权重尚未下载，首次运行会自动拉取: RealESRGAN_x4plus.pth" in payload["warnings"]

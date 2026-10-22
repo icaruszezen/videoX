@@ -352,10 +352,6 @@ def test_pipeline_runs_with_local_weights(tmp_path: Path, monkeypatch: pytest.Mo
         run_scunet(request(output_path=tmp_path / "x.gif"))
     with pytest.raises(VideoXError, match="未知的 SCUNet 模型"):
         run_scunet(request(model="nope"))
-    with pytest.raises(VideoXError, match="去噪强度"):
-        run_scunet(request(strength=1.5))
-    with pytest.raises(VideoXError, match="不能是负数"):
-        run_scunet(request(tile_pad=-1))
     with pytest.raises(VideoXError, match="输入文件不存在"):
         run_scunet(request(input_path=tmp_path / "missing.png"))
 

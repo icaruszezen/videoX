@@ -129,24 +129,42 @@ def paste_faces(
     *,
     input_size: tuple[int, int],
     upscale: int,
+    strength: float = 1.0,
 ) -> np.ndarray:
     """Blend restored faces into the upscaled background with a soft square mask.
 
     ``input_size`` is (height, width) of the original image; ``background`` is
-    resized to ``int(size * upscale)`` first, as upstream does.
+    resized to ``int(size * upscale)`` first, as upstream does. ``strength``
+    scales the mask, so 0 keeps the background and 1 is the full restored face.
+    Upstream warps and blends over the whole frame for every face; here each
+    face only touches its own bounding box, so memory follows the face size.
     """
     cv2 = cv2_module()
     height, width = input_size
     h_up, w_up = int(height * upscale), int(width * upscale)
     image = cv2.resize(background, (w_up, h_up), interpolation=cv2.INTER_LANCZOS4)
+    corners = np.array([[-1, -1, 1], [FACE_SIZE, -1, 1], [-1, FACE_SIZE, 1], [FACE_SIZE, FACE_SIZE, 1]], np.float64)
     for restored_face, matrix in zip(restored_faces, inverse_affines, strict=True):
-        matrix = matrix.copy()
+        matrix = matrix.astype(np.float64)
         # Shift by half an output pixel for more precise back alignment.
         if upscale > 1:
             matrix[:, 2] += 0.5 * upscale
-        inv_restored = cv2.warpAffine(restored_face, matrix, (w_up, h_up))
+        points = corners @ matrix.T
+        side = int(np.sqrt(abs(np.linalg.det(matrix[:, :2]))) * FACE_SIZE)
+        # Room for the erosions and the blur below, which reach past the warped square.
+        margin = 2 * (side // 20) + 2 * int(2 * upscale) + 8
+        x0 = max(int(np.floor(points[:, 0].min())) - margin, 0)
+        y0 = max(int(np.floor(points[:, 1].min())) - margin, 0)
+        x1 = min(int(np.ceil(points[:, 0].max())) + margin, w_up)
+        y1 = min(int(np.ceil(points[:, 1].max())) + margin, h_up)
+        if x0 >= x1 or y0 >= y1:
+            continue
+        matrix[0, 2] -= x0
+        matrix[1, 2] -= y0
+        size = (x1 - x0, y1 - y0)
+        inv_restored = cv2.warpAffine(restored_face, matrix, size)
         mask = np.ones((FACE_SIZE, FACE_SIZE), dtype=np.float32)
-        inv_mask = cv2.warpAffine(mask, matrix, (w_up, h_up))
+        inv_mask = cv2.warpAffine(mask, matrix, size)
         # Remove the black border left by the warp.
         inv_mask_erosion = cv2.erode(inv_mask, np.ones((int(2 * upscale), int(2 * upscale)), np.uint8))
         pasted_face = inv_mask_erosion[:, :, None] * inv_restored
@@ -157,6 +175,9 @@ def paste_faces(
         inv_mask_center = cv2.erode(inv_mask_erosion, np.ones((erosion_radius, erosion_radius), np.uint8))
         blur_size = w_edge * 2
         inv_soft_mask = cv2.GaussianBlur(inv_mask_center, (blur_size + 1, blur_size + 1), 0)[:, :, None]
-        image = inv_soft_mask * pasted_face + (1 - inv_soft_mask) * image
-    # Truncates like upstream's astype; the blend stays within 0..255.
-    return np.clip(image, 0, 255).astype(np.uint8)
+        inv_soft_mask *= strength
+        region = image[y0:y1, x0:x1]
+        blended = inv_soft_mask * pasted_face + (1 - inv_soft_mask) * region
+        # Truncates like upstream's astype; the blend stays within 0..255.
+        image[y0:y1, x0:x1] = np.clip(blended, 0, 255).astype(np.uint8)
+    return image

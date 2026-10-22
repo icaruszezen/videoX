@@ -12,10 +12,8 @@ tag v0.3.0:
 https://github.com/xinntao/facexlib/blob/v0.3.0/facexlib/detection/retinaface.py
 https://github.com/xinntao/facexlib/blob/v0.3.0/facexlib/detection/retinaface_net.py
 https://github.com/xinntao/facexlib/blob/v0.3.0/facexlib/detection/retinaface_utils.py
-Its ResNet50 backbone is built here with torchvision's layer names (what
-``IntermediateLayerGetter(resnet50(), ...)`` keeps), so only the released
-detector checkpoint is loaded and nothing is downloaded. ``py_cpu_nms`` called
-``torchvision.ops.nms``; ``nms`` below is a numpy port of the same rule.
+Like upstream, the ResNet50 backbone and NMS come from torchvision; the
+backbone starts empty (``weights=None``) and the detector checkpoint fills it.
 
 Removed: registry decorators and BasicSR imports, decoder loading and freezing,
 style mixing, truncation and latent outputs, the intermediate RGB outputs
@@ -33,6 +31,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn import init
+from torchvision.models import resnet50
+from torchvision.models._utils import IntermediateLayerGetter
+from torchvision.ops import nms
 
 
 @torch.no_grad()
@@ -418,68 +419,6 @@ VARIANCE = (0.1, 0.2)
 BGR_MEAN = (104.0, 117.0, 123.0)
 
 
-class Bottleneck(nn.Module):
-    """torchvision's ResNet bottleneck (stride on the 3x3 convolution)."""
-
-    expansion = 4
-
-    def __init__(self, inplanes: int, planes: int, stride: int = 1, downsample: nn.Module | None = None) -> None:
-        super().__init__()
-        self.conv1 = nn.Conv2d(inplanes, planes, 1, bias=False)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, 3, stride, 1, bias=False)
-        self.bn2 = nn.BatchNorm2d(planes)
-        self.conv3 = nn.Conv2d(planes, planes * self.expansion, 1, bias=False)
-        self.bn3 = nn.BatchNorm2d(planes * self.expansion)
-        self.relu = nn.ReLU(inplace=True)
-        self.downsample = downsample
-
-    def forward(self, x: Tensor) -> Tensor:
-        identity = x
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.relu(self.bn2(self.conv2(out)))
-        out = self.bn3(self.conv3(out))
-        if self.downsample is not None:
-            identity = self.downsample(x)
-        out += identity
-        return self.relu(out)
-
-
-def _resnet_layer(inplanes: int, planes: int, blocks: int, stride: int) -> nn.Sequential:
-    downsample = None
-    if stride != 1 or inplanes != planes * Bottleneck.expansion:
-        downsample = nn.Sequential(
-            nn.Conv2d(inplanes, planes * Bottleneck.expansion, 1, stride, bias=False),
-            nn.BatchNorm2d(planes * Bottleneck.expansion),
-        )
-    layers = [Bottleneck(inplanes, planes, stride, downsample)]
-    layers += [Bottleneck(planes * Bottleneck.expansion, planes) for _ in range(1, blocks)]
-    return nn.Sequential(*layers)
-
-
-class ResNet50Body(nn.Module):
-    """ResNet50 up to ``layer4``; returns the ``layer2``, ``layer3`` and ``layer4`` features."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.conv1 = nn.Conv2d(3, 64, 7, 2, 3, bias=False)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool2d(3, 2, 1)
-        self.layer1 = _resnet_layer(64, 64, 3, 1)
-        self.layer2 = _resnet_layer(256, 128, 4, 2)
-        self.layer3 = _resnet_layer(512, 256, 6, 2)
-        self.layer4 = _resnet_layer(1024, 512, 3, 2)
-
-    def forward(self, x: Tensor) -> list[Tensor]:
-        x = self.maxpool(self.relu(self.bn1(self.conv1(x))))
-        x = self.layer1(x)
-        c2 = self.layer2(x)
-        c3 = self.layer3(c2)
-        c4 = self.layer4(c3)
-        return [c2, c3, c4]
-
-
 def conv_bn(inp: int, oup: int, stride: int = 1, leaky: float = 0) -> nn.Sequential:
     return nn.Sequential(
         nn.Conv2d(inp, oup, 3, stride, 1, bias=False),
@@ -578,7 +517,7 @@ class RetinaFace(nn.Module):
         super().__init__()
         in_channels = 256
         out_channels = 256
-        self.body = ResNet50Body()
+        self.body = IntermediateLayerGetter(resnet50(weights=None), {"layer2": 1, "layer3": 2, "layer4": 3})
         self.fpn = FPN([in_channels * 2, in_channels * 4, in_channels * 8], out_channels)
         self.ssh1 = SSH(out_channels, out_channels)
         self.ssh2 = SSH(out_channels, out_channels)
@@ -590,7 +529,7 @@ class RetinaFace(nn.Module):
 
     def forward(self, inputs: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """``inputs`` is BGR, 0-255, mean already subtracted."""
-        fpn = self.fpn(self.body(inputs))
+        fpn = self.fpn(list(self.body(inputs).values()))
         features = [self.ssh1(fpn[0]), self.ssh2(fpn[1]), self.ssh3(fpn[2])]
         bbox_regressions = torch.cat([self.BboxHead[i](feature) for i, feature in enumerate(features)], dim=1)
         classifications = torch.cat([self.ClassHead[i](feature) for i, feature in enumerate(features)], dim=1)
@@ -627,7 +566,7 @@ class RetinaFace(nn.Module):
         order = scores.argsort()[::-1]
         boxes, points, scores = boxes[order], points[order], scores[order]
         bounding_boxes = np.hstack((boxes, scores[:, np.newaxis])).astype(np.float32, copy=False)
-        keep = nms(bounding_boxes, nms_threshold)
+        keep = nms(torch.from_numpy(boxes).float(), torch.from_numpy(scores).float(), nms_threshold).numpy()
         return np.concatenate((bounding_boxes[keep, :], points[keep]), axis=1)
 
 
@@ -670,25 +609,3 @@ def decode_landm(pre: Tensor, priors: Tensor, variances: tuple[float, float]) ->
         dim=1,
     )
 
-
-def nms(dets: np.ndarray, threshold: float) -> np.ndarray:
-    """Greedy NMS with ``torchvision.ops.nms`` rules: drop boxes whose IoU with a kept one is above ``threshold``."""
-    if len(dets) == 0:
-        return np.zeros(0, dtype=np.int64)
-    boxes = dets[:, :4].astype(np.float32)
-    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-    areas = (x2 - x1) * (y2 - y1)
-    order = np.argsort(-dets[:, 4].astype(np.float32), kind="stable")
-    suppressed = np.zeros(len(dets), dtype=bool)
-    keep: list[int] = []
-    for index in order:
-        if suppressed[index]:
-            continue
-        keep.append(int(index))
-        width = np.maximum(np.minimum(x2[index], x2) - np.maximum(x1[index], x1), 0)
-        height = np.maximum(np.minimum(y2[index], y2) - np.maximum(y1[index], y1), 0)
-        inter = width * height
-        with np.errstate(divide="ignore", invalid="ignore"):
-            iou = inter / (areas[index] + areas - inter)
-        suppressed |= iou > threshold
-    return np.asarray(keep, dtype=np.int64)

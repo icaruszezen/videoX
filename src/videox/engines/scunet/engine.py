@@ -3,13 +3,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from videox.engines.image_engine import MainImageEngine, format_number
-from videox.engines.scunet.presets import (
-    DEFAULT_MODEL,
-    DEFAULT_STRENGTH,
-    DEFAULT_TILE,
-    DEFAULT_TILE_PAD,
-    params_schema,
-)
+from videox.engines.scunet.presets import params_schema
 from videox.jobs.models import Capability
 
 
@@ -27,11 +21,11 @@ class SCUNetEngine(MainImageEngine):
     def entry_args(self, values: dict[str, object]) -> list[str]:
         return [
             "--model",
-            str(values.get("model", DEFAULT_MODEL)),
+            str(values["model"]),
             "--strength",
-            format_number(values.get("strength", DEFAULT_STRENGTH)),
+            format_number(values["strength"]),
             "--tile",
-            str(values.get("tile", DEFAULT_TILE)),
+            str(values["tile"]),
             "--tile-pad",
-            str(values.get("tile_pad", DEFAULT_TILE_PAD)),
+            str(values["tile_pad"]),
         ]

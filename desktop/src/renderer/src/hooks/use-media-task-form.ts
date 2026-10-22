@@ -5,9 +5,9 @@ import { ApiError, createJob } from '@/lib/api'
 import { recommendedBatchSize, suggestOutput } from '@/lib/format'
 import {
   collectParams,
-  dependentFields,
   schemaGroups,
   selectedOutputFormat,
+  valuesAfterChange,
   visibleFields,
   type FieldGroup
 } from '@/lib/task-schema'
@@ -105,14 +105,9 @@ export function useMediaTaskForm({
   }
 
   function setField(key: string, value: string | boolean): void {
-    // Fields that follow this one (usually the model choice) go back to their
-    // defaults for the new choice instead of keeping a value meant for the old one.
-    const dependents = dependentFields(engine, key)
-    setValues((current) => {
-      const next = { ...current, [key]: value }
-      for (const dependent of dependents) delete next[dependent]
-      return next
-    })
+    // Fields whose defaults follow this one (usually the model choice) move to
+    // the new default unless the user picked a value that still fits.
+    setValues((current) => valuesAfterChange(engine, media, current, key, value))
   }
 
   function changeEngine(value: string): void {

@@ -96,7 +96,11 @@ export function visibleFields(
   return fields
 }
 
-/** Fields whose visibility or defaults follow `key`, directly or through another field. */
+/**
+ * Fields whose defaults or limits follow `key`, directly or through another
+ * such field, in schema order. Fields whose visibility alone follows `key`
+ * are not included: hidden fields are never sent, so their values can stay.
+ */
 export function dependentFields(engine: EngineManifest | undefined, key: string): string[] {
   const properties = Object.entries(engine?.params_schema.properties ?? {})
   const found = new Set<string>()
@@ -105,17 +109,60 @@ export function dependentFields(engine: EngineManifest | undefined, key: string)
     const source = pending.pop()!
     for (const [name, property] of properties) {
       if (found.has(name)) continue
-      const conditions = [
-        property.visible_when,
-        ...(property.overrides ?? []).map((item) => item.when)
-      ]
-      if (conditions.some((condition) => condition && source in condition)) {
+      if ((property.overrides ?? []).some((item) => source in item.when)) {
         found.add(name)
         pending.push(name)
       }
     }
   }
-  return [...found]
+  return properties.map(([name]) => name).filter((name) => found.has(name))
+}
+
+function sameAsDefault(property: SchemaProperty, value: string | boolean): boolean {
+  if (value === '') return true
+  if (property.type === 'integer' || property.type === 'number') {
+    return Number(value) === property.default
+  }
+  return value === property.default
+}
+
+function fitsProperty(property: SchemaProperty, value: string | boolean): boolean {
+  if (property.type === 'boolean') return typeof value === 'boolean'
+  if (property.enum) return property.enum.includes(String(value))
+  if (property.type === 'integer' || property.type === 'number') {
+    const numeric = Number(value)
+    // Leave text that is not a number to collectParams, which names the field.
+    if (!Number.isFinite(numeric)) return true
+    if (property.minimum !== undefined && numeric < property.minimum) return false
+    if (property.maximum !== undefined && numeric > property.maximum) return false
+  }
+  return true
+}
+
+/**
+ * Form values after `key` is set. A dependent field's stored value is dropped,
+ * so the field shows the new default, when the user had left it at the old
+ * default or when it no longer fits the new choices or limits. Any other
+ * value the user picked stays.
+ */
+export function valuesAfterChange(
+  engine: EngineManifest | undefined,
+  media: MediaKind,
+  current: Record<string, string | boolean>,
+  key: string,
+  value: string | boolean
+): Record<string, string | boolean> {
+  const before = new Map(visibleFields(engine, media, current))
+  const next = { ...current, [key]: value }
+  for (const name of dependentFields(engine, key)) {
+    if (!(name in next)) continue
+    const old = before.get(name)
+    const now = new Map(visibleFields(engine, media, next)).get(name)
+    if ((old && sameAsDefault(old, next[name])) || (now && !fitsProperty(now, next[name]))) {
+      delete next[name]
+    }
+  }
+  return next
 }
 
 export function schemaGroups(

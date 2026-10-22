@@ -9,16 +9,13 @@ from pathlib import Path
 import torch
 
 from videox.engines.image_io import (
-    StillImage,
-    check_output_format,
+    check_output_size,
     load_state_dict,
     pick_device,
-    publish_preview,
     read_image,
-    resize_plane,
     run_tiled,
+    save_result,
     to_tensor,
-    write_image,
 )
 from videox.engines.progress import emit_progress
 from videox.engines.scunet.arch import SCUNet
@@ -40,12 +37,8 @@ class SCUNetRequest:
 
 def run_scunet(request: SCUNetRequest) -> None:
     spec = model_spec(request.model)
-    if request.tile < 0 or request.tile_pad < 0:
-        raise VideoXError("分块大小和分块重叠不能是负数")
-    if not 0 <= request.strength <= 1:
-        raise VideoXError("去噪强度需要在 0 到 1 之间")
-    check_output_format(request.output_path)
     source = read_image(request.input_path)
+    check_output_size(request.output_path, source.width, source.height)
     emit_progress("download", 0, 1)
     (checkpoint,) = ensure_model(request.model_dir, spec.id)
     emit_progress("download", 1, 1)
@@ -53,21 +46,15 @@ def run_scunet(request: SCUNetRequest) -> None:
     device = pick_device()
     model = load_model(checkpoint, spec, device)
     emit_progress("load", 1, 1)
-    try:
-        # SCUNet pads every tile to a multiple of 64 itself, so run_tiled does not pad.
-        restored = run_tiled(
-            blended(model, request.strength),
-            to_tensor(source.rgb, device),
-            scale=spec.scale,
-            tile=request.tile,
-            tile_pad=request.tile_pad,
-        )
-    except torch.cuda.OutOfMemoryError as exc:
-        raise VideoXError("显存不足，请调小分块大小后重试") from exc
-    height, width = restored.shape[:2]
-    alpha = resize_plane(source.alpha, width, height) if source.alpha is not None else None
-    write_image(request.output_path, StillImage(restored, alpha))
-    publish_preview(source, restored)
+    # SCUNet pads every tile to a multiple of 64 itself, so run_tiled does not pad.
+    restored = run_tiled(
+        blended(model, request.strength),
+        to_tensor(source.rgb, device),
+        scale=spec.scale,
+        tile=request.tile,
+        tile_pad=request.tile_pad,
+    )
+    save_result(request.output_path, source, restored)
 
 
 def build_model(spec: SCUNetModel) -> SCUNet:

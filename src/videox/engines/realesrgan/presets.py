@@ -161,7 +161,7 @@ def params_schema() -> dict:
                     group="primary",
                     media=IMAGE,
                     choices=[(model_id, spec.label) for model_id, spec in MODELS.items()],
-                    description="决定用哪个超分网络。照片选通用照片 4 倍；想更平滑、少伪影选 RealESRNet；只要 2 倍选 2 倍模型；动漫和插画选动漫模型。轻量模型更快、更省显存，细节略少。首次选用会下载对应权重。",
+                    description="决定用哪个超分网络。照片选通用照片 4 倍；想更平滑、伪影更少选标着“更平滑”的那一项；只要 2 倍选 2 倍模型；动漫和插画选动漫模型。轻量模型更快、更省显存，细节略少。首次选用会下载对应权重。",
                 ),
                 {model_id: spec.note for model_id, spec in MODELS.items()},
             ),

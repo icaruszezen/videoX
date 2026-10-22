@@ -256,6 +256,7 @@ def test_pipeline_runs_with_local_weights(tmp_path: Path, capsys):
     from videox.engines.realesrgan.arch import build_network
     from videox.engines.realesrgan.infer import (
         RealESRGANRequest,
+        load_model,
         run_realesrgan,
         upscale_rgb,
     )
@@ -268,31 +269,13 @@ def test_pipeline_runs_with_local_weights(tmp_path: Path, capsys):
 
     rgb = np.random.default_rng(0).integers(0, 256, size=(9, 13, 3), dtype=np.uint8)
     rgb.flags.writeable = False
-    whole = upscale_rgb(
-        rgb,
-        model_id="realesr-animevideov3",
-        model_dir=tmp_path,
-        device=torch.device("cpu"),
-        half=True,
-        tile=0,
-        tile_pad=10,
-        outscale=4,
-    )
+    # Half precision only applies on CUDA, so the CPU model stays in float32.
+    model = load_model("realesr-animevideov3", [tmp_path / spec.weights.name], device=torch.device("cpu"), half=True)
+    assert next(model.parameters()).dtype == torch.float32
+    whole = upscale_rgb(model, rgb, model_id="realesr-animevideov3", tile=0, tile_pad=10, outscale=4)
     assert whole.shape == (36, 52, 3) and whole.dtype == np.uint8
-    tiled = upscale_rgb(
-        rgb,
-        model_id="realesr-animevideov3",
-        model_dir=tmp_path,
-        device=torch.device("cpu"),
-        half=False,
-        tile=4,
-        tile_pad=2,
-        outscale=2.5,
-    )
+    tiled = upscale_rgb(model, rgb, model_id="realesr-animevideov3", tile=4, tile_pad=2, outscale=2.5)
     assert tiled.shape == (22, 32, 3)
-    with pytest.raises(VideoXError, match="分块大小"):
-        upscale_rgb(rgb, model_id="realesr-animevideov3", model_dir=tmp_path, device=torch.device("cpu"),
-                    half=False, tile=-1, tile_pad=0, outscale=4)
 
     rgba = np.zeros((9, 13, 4), dtype=np.uint8)
     rgba[..., :3] = rgb
@@ -320,6 +303,13 @@ def test_pipeline_runs_with_local_weights(tmp_path: Path, capsys):
         assert f'"phase": "{phase}"' in lines
     with pytest.raises(VideoXError, match="不支持的图片格式"):
         run_realesrgan(RealESRGANRequest(input_path=source, output_path=tmp_path / "x.gif", model_dir=tmp_path))
+    # The size limit is checked before any download or inference.
+    wide = tmp_path / "wide.png"
+    Image.fromarray(np.zeros((2, 8200, 3), np.uint8)).save(wide)
+    with pytest.raises(VideoXError, match="JPG 图片每边最多 65500 像素"):
+        run_realesrgan(
+            RealESRGANRequest(input_path=wide, output_path=tmp_path / "x.jpg", model_dir=tmp_path / "none", outscale=8)
+        )
 
 
 @pytest.mark.parametrize("model_id", list(MODELS))
@@ -329,19 +319,12 @@ def test_released_weights_load_and_run(model_id: str):
         pytest.skip("Real-ESRGAN weights were not downloaded to .work/weights/RealESRGAN")
     torch = pytest.importorskip("torch")
     np = pytest.importorskip("numpy")
-    from videox.engines.realesrgan.infer import upscale_rgb
+    from videox.engines.realesrgan.infer import load_model, upscale_rgb
+    from videox.engines.realesrgan.presets import required_weights
 
-    # upscale_rgb loads every file with strict=True and blends the denoise pair.
+    # load_model loads every file with strict=True and blends the denoise pair.
+    paths = [WEIGHTS / weight.name for weight in required_weights(model_id, 0.3)]
+    model = load_model(model_id, paths, device=torch.device("cpu"), half=False, denoise_strength=0.3)
     rgb = np.random.default_rng(1).integers(0, 256, size=(11, 15, 3), dtype=np.uint8)
-    output = upscale_rgb(
-        rgb,
-        model_id=model_id,
-        model_dir=WEIGHTS,
-        device=torch.device("cpu"),
-        half=False,
-        tile=8,
-        tile_pad=2,
-        outscale=spec.scale,
-        denoise_strength=0.3,
-    )
+    output = upscale_rgb(model, rgb, model_id=model_id, tile=8, tile_pad=2, outscale=spec.scale)
     assert output.shape == (11 * spec.scale, 15 * spec.scale, 3)

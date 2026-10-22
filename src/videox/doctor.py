@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from videox.engines.flashvsr.weights import weight_lists as flash_weight_lists
+from videox.engines.gfpgan.engine import GFPGANEngine
 from videox.engines.gfpgan.weights import weight_lists as gfpgan_weight_lists
 from videox.engines.realbasicvsr.weights import weight_lists as realbasic_weight_lists
+from videox.engines.realesrgan.engine import RealESRGANEngine
 from videox.engines.realesrgan.weights import weight_lists as realesrgan_weight_lists
+from videox.engines.scunet.engine import SCUNetEngine
 from videox.engines.scunet.weights import weight_lists as scunet_weight_lists
 from videox.engines.seedvr2.presets import REQUIRED_MODELS
 from videox.engines.swiftvr.weights import weight_lists as swift_weight_lists
+from videox.engines.swinir.engine import SwinIREngine
 from videox.engines.swinir.weights import weight_lists as swinir_weight_lists
 from videox.hardware.gpus import query_gpus
 from videox.paths import (
@@ -103,33 +108,44 @@ def _expected(path: Path) -> str | None:
         return None
 
 
-# Image engines whose code lives in this repository. Each downloads a model's
-# weights the first time that model is chosen, so missing weights are not a warning.
+# Image engines whose code lives in this repository and runs in the main
+# environment. Each downloads a model's weights the first time it is chosen.
 _IMAGE_ENGINES = (
-    ("realesrgan", "Real-ESRGAN", "RealESRGAN", realesrgan_weight_lists),
-    ("swinir", "SwinIR", "SwinIR", swinir_weight_lists),
-    ("scunet", "SCUNet", "SCUNet", scunet_weight_lists),
-    ("gfpgan", "GFPGAN", "GFPGAN", gfpgan_weight_lists),
+    (RealESRGANEngine(), realesrgan_weight_lists),
+    (SwinIREngine(), swinir_weight_lists),
+    (SCUNetEngine(), scunet_weight_lists),
+    (GFPGANEngine(), gfpgan_weight_lists),
 )
-_IMAGE_ENGINE_IDS = {engine_id for engine_id, *_rest in _IMAGE_ENGINES}
+# Import name and pip package of what the image engines load besides torch.
+_IMAGE_PACKAGES = (("numpy", "numpy"), ("PIL", "Pillow"))
+_FACE_PACKAGES = (("cv2", "opencv-python"),)
+
+
+def _missing_packages(packages: tuple[tuple[str, str], ...]) -> list[str]:
+    return [package for module, package in packages if importlib.util.find_spec(module) is None]
 
 
 def _image_engine_statuses(root: Path) -> list[EngineStatus]:
     statuses: list[EngineStatus] = []
-    for engine_id, name, folder, weight_lists in _IMAGE_ENGINES:
-        weights = weights_dir(folder, root)
+    for engine, weight_lists in _IMAGE_ENGINES:
+        weights = weights_dir(engine.weights_folder, root)
         present, missing = weight_lists(weights)
+        packages = _IMAGE_PACKAGES + (_FACE_PACKAGES if "face" in engine.capabilities else ())
+        lacking = _missing_packages(packages)
+        detail = "使用主环境，只处理图片。每个模型（包括默认模型）在首次选用时自动下载。"
+        if lacking:
+            detail = f"主环境缺少 {', '.join(lacking)}，请运行 videox setup"
         statuses.append(
             EngineStatus(
-                id=engine_id,
-                name=name,
+                id=engine.id,
+                name=engine.name,
                 present=True,
-                venv_ready=True,
+                venv_ready=not lacking,
                 builtin=True,
                 model_dir=str(weights),
                 models_present=present,
                 models_missing=missing,
-                detail="使用主环境，只处理图片。缺少的是默认模型，其余模型首次选用时下载。",
+                detail=detail,
             )
         )
     return statuses
@@ -221,9 +237,11 @@ def _engine_statuses(root: Path) -> list[EngineStatus]:
 def _engine_warnings(engines: list[EngineStatus]) -> list[str]:
     warnings: list[str] = []
     for engine in engines:
-        if engine.id == "seedvr2" or engine.id in _IMAGE_ENGINE_IDS:
+        if engine.id == "seedvr2":
             continue
-        if not engine.builtin and not engine.present:
+        if engine.builtin and not engine.venv_ready:
+            warnings.append(f"{engine.name}: {engine.detail}")
+        elif not engine.builtin and not engine.present:
             warnings.append(f"{engine.name} 还没有检出，请运行 videox setup")
         elif not engine.builtin and not engine.venv_ready:
             warnings.append(f"{engine.name} 的虚拟环境还没有装好，请运行 videox setup")
