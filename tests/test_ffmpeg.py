@@ -1,6 +1,10 @@
+import shutil
+import subprocess
 from pathlib import Path
 
-from videox.media.ffmpeg import parse_rate, remux_audio_args
+import pytest
+
+from videox.media.ffmpeg import parse_rate, remux_audio_args, transmux_video
 
 
 def test_remux_copies_original_audio_by_default():
@@ -68,3 +72,25 @@ def test_remux_can_reencode_audio_when_copy_fails():
         reencode_audio=True,
     )
     assert command[command.index("-c:a") + 1] == "aac"
+
+
+def test_m4v_is_written_with_the_mp4_muxer():
+    # ffmpeg's ipod muxer (its choice for .m4v) cannot hold HEVC.
+    command = remux_audio_args(Path("v.mp4"), Path("in.mp4"), Path("out.m4v"), hevc=True)
+    assert command[-3:] == ["-f", "mp4", "out.m4v"]
+    assert "-f" not in remux_audio_args(Path("v.mp4"), Path("in.mp4"), Path("out.mov"))
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_hevc_fits_in_m4v(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("videox.media.ffmpeg.ffmpeg_executable", lambda: "ffmpeg")
+    hevc = tmp_path / "hevc.mp4"
+    made = subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=25",
+         "-frames:v", "5", "-c:v", "libx265", "-x265-params", "log-level=none", str(hevc)],
+        check=False,
+    )
+    if made.returncode != 0:
+        pytest.skip("ffmpeg has no libx265")
+    transmux_video(hevc, tmp_path / "out.m4v", hevc=True)
+    assert (tmp_path / "out.m4v").stat().st_size > 0

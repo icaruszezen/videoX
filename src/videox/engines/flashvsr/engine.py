@@ -48,7 +48,8 @@ class FlashVSREngine:
         sparse = root / ".videox-sparse"
         if sparse.is_file() and sparse.read_text(encoding="utf-8").strip() == "missing":
             raise VideoXError("FlashVSR 缺少 Block-Sparse-Attention，无法运行。请安装 CUDA Toolkit 后重新运行 videox setup。")
-        if not engine_venv_ready(root):
+        # Setup before the import check never installed modelscope, which diffsynth needs.
+        if not engine_venv_ready(root, unchecked_ready=False):
             raise VideoXError("FlashVSR 的依赖没有装好。请重新运行 videox setup。")
         return str(python)
 

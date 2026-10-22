@@ -4,6 +4,7 @@ from typing import ClassVar
 
 from videox.engines.gfpgan.presets import params_schema
 from videox.engines.image_engine import MainImageEngine, format_number
+from videox.engines.progress import FaceThenRestoreParser
 from videox.jobs.models import Capability
 
 
@@ -17,6 +18,10 @@ class GFPGANEngine(MainImageEngine):
 
     def params_schema(self) -> dict:
         return params_schema()
+
+    def new_log_parser(self) -> FaceThenRestoreParser:
+        # Faces fill the first half of the restore slice, the background the second.
+        return FaceThenRestoreParser()
 
     def entry_args(self, values: dict[str, object]) -> list[str]:
         args = [

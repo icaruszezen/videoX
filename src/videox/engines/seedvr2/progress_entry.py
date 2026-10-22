@@ -312,8 +312,10 @@ def _install_worker_watchdog() -> None:
         return
 
     def tracked_start(self):
+        # BaseProcess.start deletes _target once the child is running.
+        target = getattr(self, "_target", None)
         start(self)
-        if getattr(self, "_target", None) is _wrapped_worker:
+        if target is _wrapped_worker:
             _workers.append(self)
 
     tracked_start._videox_wrapped = True
@@ -325,15 +327,23 @@ def _install_worker_watchdog() -> None:
             dead = [worker for worker in list(_workers) if worker.exitcode not in (None, 0)]
             if not dead:
                 continue
-            print(
-                f"SeedVR2 多卡子进程异常退出（退出码 {dead[0].exitcode}），任务已终止。"
-                "常见原因是显存不足，可以只选一张卡，或降低分辨率、批大小后重试。",
-                flush=True,
-            )
+            code = dead[0].exitcode
+            # Exit code 1 is an uncaught exception whose traceback the job error already
+            # quotes; a killed or crashed worker leaves nothing, so this line is the error.
+            prefix = "" if code == 1 else "错误: "
+            cause = "系统内存或显存不足" if code == 1 else "系统内存不足（进程被强制结束）或显存不足"
+            try:
+                print(
+                    f"{prefix}SeedVR2 多卡子进程异常退出（退出码 {code}），任务已终止。"
+                    f"常见原因是{cause}，可以只选一张卡，或降低分辨率、批大小后重试。",
+                    flush=True,
+                )
+            except (OSError, ValueError):
+                # Nobody is reading any more (Ctrl-C); still stop the workers and exit.
+                pass
             for worker in list(_workers):
                 if worker.exitcode is None:
                     worker.terminate()
-            sys.stdout.flush()
             os._exit(1)
 
     threading.Thread(target=watch, daemon=True).start()

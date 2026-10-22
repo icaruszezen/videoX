@@ -307,6 +307,14 @@ class JobRunner:
         engine.build_command(prepared, ctx)
         return prepared
 
+    def shutdown(self) -> None:
+        """Stop running engines when the server exits; they are not in its process group."""
+        with self._lock:
+            running = list(self._procs.values())
+        for process in running:
+            if process.poll() is None:
+                kill_process_tree(process.pid)
+
     def preview_directory(self, job_id: str) -> Path:
         return self.project_root / "output" / ".previews" / job_id
 
@@ -418,6 +426,11 @@ class JobRunner:
                         echo,
                     )
             return_code = process.wait()
+        except BaseException:
+            # Ctrl-C in `videox restore`: the engine runs in its own session, so the
+            # terminal's SIGINT does not reach it.
+            kill_process_tree(process.pid)
+            raise
         finally:
             with self._lock:
                 self._procs.pop(job_id, None)

@@ -25,6 +25,11 @@ class MediaInfo:
 _HVC1_SUFFIXES = {".mp4", ".m4v", ".mov"}
 
 
+def _muxer_args(dest: Path) -> list[str]:
+    # ffmpeg picks its ipod muxer for .m4v, which refuses HEVC; .m4v is plain MP4.
+    return ["-f", "mp4"] if dest.suffix.lower() == ".m4v" else []
+
+
 def ffmpeg_executable() -> str:
     found = tool_executable("ffmpeg")
     if not found:
@@ -141,7 +146,7 @@ def remux_audio_args(
     if max_duration is None:
         # Without a known video length, fall back to trimming at the shorter stream.
         command.append("-shortest")
-    command.append(str(dest))
+    command.extend([*_muxer_args(dest), str(dest)])
     return command
 
 
@@ -193,7 +198,7 @@ def transmux_video(video_only: Path, dest: Path, *, hevc: bool = False) -> None:
     if retag:
         command.extend(["-tag:v", "hvc1"])
     completed = subprocess.run(
-        [*command, str(dest)],
+        [*command, *_muxer_args(dest), str(dest)],
         check=False,
         capture_output=True,
         text=True,

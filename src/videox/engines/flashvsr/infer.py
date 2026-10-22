@@ -11,7 +11,7 @@ from videox.engines.flashvsr.weights import ensure_weights
 from videox.engines.preview_io import publish_pair
 from videox.engines.progress import emit_progress
 from videox.errors import VideoXError
-from videox.media.frames import probe_video
+from videox.media.frames import BT709_OUTPUT_FILTER, probe_video
 
 
 @dataclass(frozen=True)
@@ -84,7 +84,7 @@ def run_flashvsr(request: FlashRequest) -> None:
     # The input was padded with copies of the last frame and edge pixels; keep
     # only the source frames at the plain ×N size.
     video = video[:, : clip.total, : clip.scaled_h, : clip.scaled_w]
-    _save_video(video, request.output_path, clip.fps, clip.rate)
+    _save_video(video, request.output_path, clip.fps, clip.rate, clip.sar)
     _publish(video, clip.source)
     emit_progress("restore", 1, 1)
 
@@ -199,6 +199,7 @@ class _Clip:
     padded_h: int
     fps: float
     rate: str
+    sar: str | None
     source: object
 
 
@@ -235,7 +236,9 @@ def _prepare_input(path: Path, scale: int) -> _Clip:
         frames[slot] = b""
         video[0, :, slot] = _to_tensor(_upscale_pad(image, scaled_w, scaled_h, padded_w, padded_h))
     video[0, :, total:] = video[0, :, total - 1 : total]
-    return _Clip(video, total, count, scaled_w, scaled_h, padded_w, padded_h, reader.fps, reader.rate, source)
+    return _Clip(
+        video, total, count, scaled_w, scaled_h, padded_w, padded_h, reader.fps, reader.rate, reader.sar, source
+    )
 
 
 def _smallest_8n1_at_least(count: int) -> int:
@@ -274,7 +277,7 @@ def _to_tensor(image):
     return tensor.to(dtype=torch.bfloat16)
 
 
-def _save_video(video, path: Path, fps: float, rate: str | None) -> None:
+def _save_video(video, path: Path, fps: float, rate: str | None, sar: str | None = None) -> None:
     import imageio.v2 as imageio
     import numpy as np
     import torch
@@ -283,7 +286,10 @@ def _save_video(video, path: Path, fps: float, rate: str | None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # imageio writes -r with two decimals; a later input -r keeps 30000/1001 exact.
     extra = {"input_params": ["-r", rate]} if rate else {}
-    writer = imageio.get_writer(str(path), fps=fps, quality=8, macro_block_size=None, **extra)
+    filters = BT709_OUTPUT_FILTER + (f",setsar={sar}" if sar else "")
+    writer = imageio.get_writer(
+        str(path), fps=fps, quality=8, macro_block_size=None, output_params=["-vf", filters], **extra
+    )
     try:
         # Convert a few frames at a time on the CPU instead of the whole clip as float32.
         for start in range(0, int(video.shape[1]), 8):

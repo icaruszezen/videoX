@@ -69,14 +69,14 @@ def deps_marker(engine_dir: Path) -> Path:
     return engine_dir / ".videox-deps"
 
 
-def engine_venv_ready(engine_dir: Path) -> bool:
+def engine_venv_ready(engine_dir: Path, *, unchecked_ready: bool = True) -> bool:
+    """unchecked_ready: what a venv installed before setup checked the imports counts as."""
     if not venv_python(engine_dir).is_file():
         return False
     try:
         return deps_marker(engine_dir).read_text(encoding="utf-8").strip() != "missing"
     except OSError:
-        # Installed before setup checked the imports.
-        return True
+        return unchecked_ready
 
 
 def read_rev_file(path: Path) -> str:

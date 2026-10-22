@@ -164,6 +164,50 @@ def test_progress_lines_parse():
     assert parse_engine_line('{"videox_preview": {"frame": 0}}') is None
 
 
+def test_gfpgan_progress_moves_forward_from_faces_to_background():
+    from videox.engines.gfpgan.engine import GFPGANEngine
+
+    parse = GFPGANEngine().new_log_parser()
+    lines = [
+        ("load", 1, 1),
+        ("face", 0, 2),
+        ("face", 2, 2),
+        ("restore", 0, 1),
+        ("restore", 1, 1),
+    ]
+    values = []
+    for phase, current, total in lines:
+        insight = parse(f'{{"videox_progress": {{"phase": "{phase}", "current": {current}, "total": {total}}}}}')
+        assert insight is not None
+        values.append(insight.progress)
+    assert values == sorted(values)
+    assert values[-1] == 1.0
+
+
+def test_flashvsr_counts_only_default_mode_weights_as_missing(tmp_path: Path):
+    from videox.engines.flashvsr.presets import DEFAULT_MODE, weights_for
+    from videox.engines.flashvsr.weights import weight_lists
+
+    for name in weights_for(DEFAULT_MODE):
+        (tmp_path / name).write_bytes(b"x")
+    present, missing = weight_lists(tmp_path)
+    assert missing == []
+    assert sorted(present) == sorted(weights_for(DEFAULT_MODE))
+
+
+def test_flashvsr_venv_from_before_the_import_check_needs_setup(tmp_path: Path):
+    from videox.paths import deps_marker, flashvsr_dir, venv_python
+
+    root = flashvsr_dir(tmp_path)
+    python = venv_python(root)
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+    with pytest.raises(VideoXError, match="videox setup"):
+        FlashVSREngine().resolve_python(_context(tmp_path))
+    deps_marker(root).write_text("ready", encoding="utf-8")
+    assert FlashVSREngine().resolve_python(_context(tmp_path)) == str(python)
+
+
 @pytest.mark.skipif(not PROBE.is_file(), reason="RealBasicVSR checkpoint was not downloaded")
 def test_realbasicvsr_checkpoint_matches_network():
     torch = pytest.importorskip("torch")

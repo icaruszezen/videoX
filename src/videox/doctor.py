@@ -202,7 +202,7 @@ def _engine_statuses(root: Path) -> list[EngineStatus]:
             present=flash_present,
             commit=flash_commit,
             commit_expected=flash_expected,
-            venv_ready=engine_venv_ready(flash_root) and sparse_marker != "missing",
+            venv_ready=engine_venv_ready(flash_root, unchecked_ready=False) and sparse_marker != "missing",
             model_dir=str(flash_weights),
             models_present=flash_present_files,
             models_missing=flash_missing,

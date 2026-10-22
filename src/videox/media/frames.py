@@ -16,6 +16,14 @@ from videox.errors import VideoXError
 from videox.media.ffmpeg import ffmpeg_executable, ffprobe_executable
 
 
+# Restored frames are usually HD-sized, which players decode as BT.709; convert
+# RGB with that matrix and tag it, instead of swscale's untagged BT.601.
+BT709_OUTPUT_FILTER = (
+    "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,"
+    "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv"
+)
+
+
 class FrameReader:
     def __init__(self, path: Path) -> None:
         probe = probe_video(path)
@@ -23,6 +31,8 @@ class FrameReader:
         self.fps, self.rate, self.sar = probe.fps, probe.rate, probe.sar
         self.frame_count = probe.frame_count
         self._frame_bytes = self.width * self.height * 3
+        # Untagged HD: players assume BT.709, while ffmpeg would convert with BT.601.
+        matrix = ["-vf", "scale=in_color_matrix=bt709,format=rgb24"] if probe.untagged_hd else []
         # A file, not a pipe: a long run of decode warnings cannot block ffmpeg.
         self._stderr = tempfile.TemporaryFile()
         self._process = subprocess.Popen(
@@ -38,6 +48,7 @@ class FrameReader:
                 # frame rate phone clips do not come out longer than the source.
                 "-r",
                 self.rate,
+                *matrix,
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
@@ -84,6 +95,7 @@ class VideoProbe:
     rate: str
     sar: str | None
     frame_count: int
+    untagged_hd: bool = False
 
 
 def probe_video(path: Path) -> VideoProbe:
@@ -121,14 +133,22 @@ def probe_video(path: Path) -> VideoProbe:
         height = int(video["height"])
     except (KeyError, TypeError, ValueError) as exc:
         raise VideoXError(f"读不到视频分辨率: {path}") from exc
+    # mpv, VLC and browsers pick the matrix of untagged video by its coded size.
+    untagged_hd = str(video.get("color_space") or "unknown") in {"unknown", "reserved"} and (
+        width >= 1280 or height > 576
+    )
+    sar = _sample_aspect(video)
     if _quarter_turn(video):
         # ffmpeg rotates portrait phone video while decoding, so the frames
-        # arrive with width and height swapped.
+        # arrive with width and height swapped, and the pixel aspect inverted.
         width, height = height, width
+        if sar:
+            numerator, _, denominator = sar.partition("/")
+            sar = f"{denominator}/{numerator}"
     rate = _choose_rate(video)
     fps = _parse_rate(rate)
     frames = _frame_count(video, payload.get("format") or {}, fps)
-    return VideoProbe(width, height, fps, rate, _sample_aspect(video), frames)
+    return VideoProbe(width, height, fps, rate, sar, frames, untagged_hd)
 
 
 def _quarter_turn(stream: dict) -> bool:

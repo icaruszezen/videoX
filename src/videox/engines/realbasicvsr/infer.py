@@ -17,7 +17,7 @@ from videox.engines.realbasicvsr.arch import load_realbasicvsr
 from videox.engines.realbasicvsr.weights import ensure_checkpoint
 from videox.errors import VideoXError
 from videox.media.ffmpeg import ffmpeg_executable
-from videox.media.frames import FrameReader
+from videox.media.frames import BT709_OUTPUT_FILTER, FrameReader
 
 
 @dataclass(frozen=True)
@@ -117,12 +117,7 @@ def _pad(video: torch.Tensor) -> tuple[torch.Tensor, int, int]:
 class _FrameWriter:
     def __init__(self, path: Path, width: int, height: int, rate: str, *, sar: str | None = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # The output is always HD-sized, which players decode as BT.709; convert
-        # with that matrix and say so, instead of swscale's untagged BT.601.
-        filters = (
-            "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,"
-            "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv"
-        )
+        filters = BT709_OUTPUT_FILTER
         if sar:
             filters += f",setsar={sar}"
         self._process = subprocess.Popen(
