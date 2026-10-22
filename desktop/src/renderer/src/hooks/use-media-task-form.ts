@@ -5,6 +5,7 @@ import { ApiError, createJob } from '@/lib/api'
 import { recommendedBatchSize, suggestOutput } from '@/lib/format'
 import {
   collectParams,
+  dependentFields,
   schemaGroups,
   selectedOutputFormat,
   visibleFields,
@@ -78,7 +79,7 @@ export function useMediaTaskForm({
 
   const available = engines.filter((item) => (item.media ?? ['video']).includes(media))
   const engine = available.find((item) => item.id === engineId) ?? available[0]
-  const fields = visibleFields(engine, media)
+  const fields = visibleFields(engine, media, values)
   const primaryFields = fields.filter(([, property]) => (property.group ?? 'primary') === 'primary')
   const advancedGroups = schemaGroups(engine, fields, ['primary'])
   const parameterGroups = schemaGroups(engine, fields)
@@ -104,7 +105,14 @@ export function useMediaTaskForm({
   }
 
   function setField(key: string, value: string | boolean): void {
-    setValues((current) => ({ ...current, [key]: value }))
+    // Fields that follow this one (usually the model choice) go back to their
+    // defaults for the new choice instead of keeping a value meant for the old one.
+    const dependents = dependentFields(engine, key)
+    setValues((current) => {
+      const next = { ...current, [key]: value }
+      for (const dependent of dependents) delete next[dependent]
+      return next
+    })
   }
 
   function changeEngine(value: string): void {

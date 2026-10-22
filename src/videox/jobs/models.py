@@ -59,7 +59,7 @@ class ProgressEvent(BaseModel):
     preview_frame: int | None = None
 
 
-Capability = Literal["upscale", "interpolate", "face"]
+Capability = Literal["upscale", "interpolate", "face", "denoise"]
 DevicePolicy = Literal["multi", "single"]
 
 

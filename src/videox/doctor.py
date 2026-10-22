@@ -6,9 +6,13 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from videox.engines.flashvsr.weights import weight_lists as flash_weight_lists
+from videox.engines.gfpgan.weights import weight_lists as gfpgan_weight_lists
 from videox.engines.realbasicvsr.weights import weight_lists as realbasic_weight_lists
+from videox.engines.realesrgan.weights import weight_lists as realesrgan_weight_lists
+from videox.engines.scunet.weights import weight_lists as scunet_weight_lists
 from videox.engines.seedvr2.presets import REQUIRED_MODELS
 from videox.engines.swiftvr.weights import weight_lists as swift_weight_lists
+from videox.engines.swinir.weights import weight_lists as swinir_weight_lists
 from videox.hardware.gpus import query_gpus
 from videox.paths import (
     flashvsr_dir,
@@ -43,6 +47,7 @@ class EngineStatus(BaseModel):
     models_present: list[str] = Field(default_factory=list)
     models_missing: list[str] = Field(default_factory=list)
     detail: str = ""
+    builtin: bool = False
 
 
 class SystemReport(BaseModel):
@@ -96,6 +101,38 @@ def _expected(path: Path) -> str | None:
         return read_rev_file(path)
     except (FileNotFoundError, ValueError):
         return None
+
+
+# Image engines whose code lives in this repository. Each downloads a model's
+# weights the first time that model is chosen, so missing weights are not a warning.
+_IMAGE_ENGINES = (
+    ("realesrgan", "Real-ESRGAN", "RealESRGAN", realesrgan_weight_lists),
+    ("swinir", "SwinIR", "SwinIR", swinir_weight_lists),
+    ("scunet", "SCUNet", "SCUNet", scunet_weight_lists),
+    ("gfpgan", "GFPGAN", "GFPGAN", gfpgan_weight_lists),
+)
+_IMAGE_ENGINE_IDS = {engine_id for engine_id, *_rest in _IMAGE_ENGINES}
+
+
+def _image_engine_statuses(root: Path) -> list[EngineStatus]:
+    statuses: list[EngineStatus] = []
+    for engine_id, name, folder, weight_lists in _IMAGE_ENGINES:
+        weights = weights_dir(folder, root)
+        present, missing = weight_lists(weights)
+        statuses.append(
+            EngineStatus(
+                id=engine_id,
+                name=name,
+                present=True,
+                venv_ready=True,
+                builtin=True,
+                model_dir=str(weights),
+                models_present=present,
+                models_missing=missing,
+                detail="使用主环境，只处理图片。缺少的是默认模型，其余模型首次选用时下载。",
+            )
+        )
+    return statuses
 
 
 def _engine_statuses(root: Path) -> list[EngineStatus]:
@@ -171,22 +208,24 @@ def _engine_statuses(root: Path) -> list[EngineStatus]:
             name="RealBasicVSR",
             present=True,
             venv_ready=True,
+            builtin=True,
             model_dir=str(real_weights),
             models_present=real_present_files,
             models_missing=real_missing,
             detail="使用主环境，固定 4 倍",
         ),
+        *_image_engine_statuses(root),
     ]
 
 
 def _engine_warnings(engines: list[EngineStatus]) -> list[str]:
     warnings: list[str] = []
     for engine in engines:
-        if engine.id == "seedvr2":
+        if engine.id == "seedvr2" or engine.id in _IMAGE_ENGINE_IDS:
             continue
-        if engine.id != "realbasicvsr" and not engine.present:
+        if not engine.builtin and not engine.present:
             warnings.append(f"{engine.name} 还没有检出，请运行 videox setup")
-        elif engine.id != "realbasicvsr" and not engine.venv_ready:
+        elif not engine.builtin and not engine.venv_ready:
             warnings.append(f"{engine.name} 的虚拟环境还没有装好，请运行 videox setup")
         elif (
             engine.commit_expected

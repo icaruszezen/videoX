@@ -52,7 +52,7 @@ def run(argv: list[str] | None = None) -> int:
     restore_parser.add_argument(
         "--engine",
         default="seedvr2",
-        help="引擎：seedvr2、flashvsr、swiftvr、realbasicvsr",
+        help="引擎：seedvr2、flashvsr、swiftvr、realbasicvsr；图片还可以用 realesrgan、swinir、scunet、gfpgan",
     )
 
     serve_parser = sub.add_parser("serve", help="启动给以后界面使用的本地 API")

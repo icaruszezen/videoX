@@ -36,7 +36,7 @@ function WeightBadges({
 
 function EngineCard({ engine }: { engine: EngineStatus }): React.JSX.Element {
   const checkedOut =
-    engine.id === 'realbasicvsr'
+    engine.builtin || engine.id === 'realbasicvsr'
       ? '内置'
       : engine.present
         ? `已检出 ${shortCommit(engine.commit)}`

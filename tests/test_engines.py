@@ -42,9 +42,12 @@ def _video_job(tmp_path: Path, engine_id: str, **params: object) -> JobSpec:
     )
 
 
-def test_registry_lists_four_engines():
+IMAGE_ENGINES = ("realesrgan", "swinir", "scunet", "gfpgan")
+
+
+def test_registry_lists_video_and_image_engines():
     manifests = {item.id: item for item in default_registry().manifests()}
-    assert list(manifests) == ["seedvr2", "flashvsr", "swiftvr", "realbasicvsr"]
+    assert list(manifests) == ["seedvr2", "flashvsr", "swiftvr", "realbasicvsr", *IMAGE_ENGINES]
     assert manifests["seedvr2"].device_policy == "multi"
     assert manifests["seedvr2"].media == ["video", "image"]
     for engine_id in ("flashvsr", "swiftvr", "realbasicvsr"):
@@ -53,6 +56,9 @@ def test_registry_lists_four_engines():
         for name, prop in manifests[engine_id].params_schema["properties"].items():
             assert prop.get("description"), name
             assert "default" in prop
+    for engine_id in IMAGE_ENGINES:
+        assert manifests[engine_id].device_policy == "single"
+        assert manifests[engine_id].media == ["image"]
 
 
 def test_switching_schema_changes_defaults():

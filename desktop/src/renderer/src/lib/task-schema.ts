@@ -1,5 +1,11 @@
 import { isSimpleProperty, paramLabel } from '@/lib/format'
-import type { EngineManifest, MediaKind, SchemaProperty } from '@/lib/types'
+import type {
+  EngineManifest,
+  MediaKind,
+  SchemaCondition,
+  SchemaProperty,
+  SchemaScalar
+} from '@/lib/types'
 
 export interface FieldGroup {
   id: string
@@ -8,7 +14,9 @@ export interface FieldGroup {
 }
 
 export const ENGINE_HELP =
-  '实际执行修复的模型。视频可以在 SeedVR2、FlashVSR、SwiftVR 和 RealBasicVSR 之间切换，切换后配置项和默认值会换成该模型自己的。图片仍使用 SeedVR2。'
+  '实际执行修复的模型。视频可以在 SeedVR2、FlashVSR、SwiftVR 和 RealBasicVSR 之间切换，切换后配置项和默认值会换成该模型自己的。'
+export const IMAGE_ENGINE_HELP =
+  '实际处理图片的模型。SeedVR2 是扩散修复，细节最多也最慢；Real-ESRGAN 快且省显存，适合照片和动漫；SwinIR 能超分、去噪和去 JPEG 压缩块；SCUNet 专门去噪；GFPGAN 修复人脸。切换引擎或引擎里的模型后，下面的配置项和默认值会跟着换。'
 export const GPU_HELP =
   '勾选参与计算的显卡。都不选时，有两张及以上显卡会用前两张，只有一张就用那一张。双卡按帧分段，每张卡各加载一份模型。'
 
@@ -23,17 +31,91 @@ export function fieldTitle(name: string, property: SchemaProperty): string {
   return paramLabel(name, property.title)
 }
 
+export function engineHelp(media: MediaKind): string {
+  return media === 'image' ? IMAGE_ENGINE_HELP : ENGINE_HELP
+}
+
 function appliesTo(property: SchemaProperty, media: MediaKind): boolean {
   return !property.media || property.media.length === 0 || property.media.includes(media)
 }
 
+function conditionHolds(
+  condition: SchemaCondition,
+  current: Record<string, SchemaScalar | undefined>
+): boolean {
+  return Object.entries(condition).every(([key, allowed]) => {
+    const value = current[key]
+    return value !== undefined && allowed.includes(value)
+  })
+}
+
+/** Applies visible_when and the first matching override. Null means the field is hidden. */
+function resolveProperty(
+  property: SchemaProperty,
+  current: Record<string, SchemaScalar | undefined>
+): SchemaProperty | null {
+  if (property.visible_when && !conditionHolds(property.visible_when, current)) return null
+  const override = property.overrides?.find((item) => conditionHolds(item.when, current))
+  if (!override) return property
+  const merged: SchemaProperty & { when?: SchemaCondition } = { ...property, ...override }
+  delete merged.when
+  return merged
+}
+
+function typedValue(
+  property: SchemaProperty,
+  value: string | boolean | undefined
+): SchemaScalar | undefined {
+  if (value === undefined || value === '') return property.default
+  if (property.type === 'boolean') return Boolean(value)
+  if (property.type === 'integer' || property.type === 'number') {
+    const numeric = Number(value)
+    return Number.isFinite(numeric) ? numeric : property.default
+  }
+  return value
+}
+
+/**
+ * Fields for this engine and media, resolved against the current form values
+ * in schema order, the same way the server resolves them.
+ */
 export function visibleFields(
   engine: EngineManifest | undefined,
-  media: MediaKind
+  media: MediaKind,
+  values: Record<string, string | boolean> = {}
 ): Array<[string, SchemaProperty]> {
-  return Object.entries(engine?.params_schema.properties ?? {}).filter(
-    ([, property]) => isSimpleProperty(property) && appliesTo(property, media)
-  )
+  const current: Record<string, SchemaScalar | undefined> = {}
+  const fields: Array<[string, SchemaProperty]> = []
+  for (const [key, property] of Object.entries(engine?.params_schema.properties ?? {})) {
+    if (!isSimpleProperty(property) || !appliesTo(property, media)) continue
+    const resolved = resolveProperty(property, current)
+    if (!resolved) continue
+    current[key] = typedValue(resolved, values[key])
+    fields.push([key, resolved])
+  }
+  return fields
+}
+
+/** Fields whose visibility or defaults follow `key`, directly or through another field. */
+export function dependentFields(engine: EngineManifest | undefined, key: string): string[] {
+  const properties = Object.entries(engine?.params_schema.properties ?? {})
+  const found = new Set<string>()
+  const pending = [key]
+  while (pending.length > 0) {
+    const source = pending.pop()!
+    for (const [name, property] of properties) {
+      if (found.has(name)) continue
+      const conditions = [
+        property.visible_when,
+        ...(property.overrides ?? []).map((item) => item.when)
+      ]
+      if (conditions.some((condition) => condition && source in condition)) {
+        found.add(name)
+        pending.push(name)
+      }
+    }
+  }
+  return [...found]
 }
 
 export function schemaGroups(

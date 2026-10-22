@@ -93,16 +93,18 @@ export function EngineSelect({
   engine,
   available,
   connected,
+  help = ENGINE_HELP,
   onChange
 }: {
   engine: EngineManifest | undefined
   available: EngineManifest[]
   connected: boolean
+  help?: string
   onChange: (value: string) => void
 }): React.JSX.Element {
   return (
     <div className="flex flex-col gap-2">
-      <FieldLabel label="引擎" help={ENGINE_HELP} />
+      <FieldLabel label="引擎" help={help} />
       {engine ? (
         <Select value={engine.id} onValueChange={onChange} disabled={!connected}>
           <SelectTrigger className="w-full">
@@ -208,6 +210,7 @@ export function SchemaField({
         : typeof property.default === 'string' && property.enum.includes(property.default)
           ? property.default
           : property.enum[0]
+    const note = property.enum_descriptions?.[current]
     return (
       <div className="flex flex-col gap-2">
         <FieldLabel label={title} help={property.description} />
@@ -223,6 +226,7 @@ export function SchemaField({
             ))}
           </SelectContent>
         </Select>
+        {note ? <p className="text-xs text-muted-foreground">{note}</p> : null}
       </div>
     )
   }

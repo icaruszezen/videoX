@@ -15,7 +15,16 @@ def test_engines_and_missing_input(tmp_path, monkeypatch):
     engines = client.get("/engines")
     assert engines.status_code == 200
     body = engines.json()
-    assert [item["id"] for item in body] == ["seedvr2", "flashvsr", "swiftvr", "realbasicvsr"]
+    assert [item["id"] for item in body] == [
+        "seedvr2",
+        "flashvsr",
+        "swiftvr",
+        "realbasicvsr",
+        "realesrgan",
+        "swinir",
+        "scunet",
+        "gfpgan",
+    ]
     assert "upscale" in body[0]["capabilities"]
     assert body[0]["media"] == ["video", "image"]
     assert body[0]["device_policy"] == "multi"
@@ -52,4 +61,12 @@ def test_engines_and_missing_input(tmp_path, monkeypatch):
         "flashvsr",
         "swiftvr",
         "realbasicvsr",
+        "realesrgan",
+        "swinir",
+        "scunet",
+        "gfpgan",
     ]
+    image_status = {item["id"]: item for item in payload["engines"][4:]}
+    assert all(item["builtin"] for item in image_status.values())
+    assert image_status["realesrgan"]["models_missing"] == ["RealESRGAN_x4plus.pth"]
+    assert not any("Real-ESRGAN" in warning or "GFPGAN" in warning for warning in payload["warnings"])
