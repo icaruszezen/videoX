@@ -22,6 +22,7 @@ class EventType(str, Enum):
     stage = "stage"
     log = "log"
     progress = "progress"
+    preview = "preview"
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
@@ -55,9 +56,11 @@ class ProgressEvent(BaseModel):
     message: str = ""
     progress: float | None = None
     stage: str | None = None
+    preview_frame: int | None = None
 
 
 Capability = Literal["upscale", "interpolate", "face"]
+DevicePolicy = Literal["multi", "single"]
 
 
 class EngineManifest(BaseModel):
@@ -66,4 +69,5 @@ class EngineManifest(BaseModel):
     description: str
     capabilities: list[Capability]
     media: list[MediaKind] = Field(default_factory=lambda: ["video"])
+    device_policy: DevicePolicy = "multi"
     params_schema: dict[str, Any]

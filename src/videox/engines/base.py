@@ -12,6 +12,7 @@ from videox.jobs.models import EngineManifest, JobSpec
 class LogInsight:
     stage: str | None = None
     progress: float | None = None
+    preview_frame: int | None = None
 
 
 @dataclass

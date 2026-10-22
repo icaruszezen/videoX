@@ -34,6 +34,14 @@ def parse_seedvr2_line(line: str) -> LogInsight | None:
     text = line.strip()
     if not text:
         return None
+    if text.startswith("{") and "videox_preview" in text:
+        try:
+            frame = int(json.loads(text)["videox_preview"]["frame"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return None
+        if frame < 1:
+            return None
+        return LogInsight(preview_frame=frame)
     if text.startswith("{") and "videox_progress" in text:
         try:
             payload = json.loads(text)["videox_progress"]

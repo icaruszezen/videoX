@@ -3,12 +3,61 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatMemory, shortCommit } from '@/lib/format'
-import type { SystemReport } from '@/lib/types'
+import type { EngineStatus, SystemReport } from '@/lib/types'
 
 interface SystemPageProps {
   connected: boolean
   system: SystemReport | null
   onRefresh: () => void
+}
+
+function WeightBadges({
+  present,
+  missing
+}: {
+  present: string[]
+  missing: string[]
+}): React.JSX.Element {
+  return (
+    <div className="flex flex-wrap gap-2 pt-1">
+      {present.map((name) => (
+        <Badge key={name} variant="secondary">
+          {name}
+        </Badge>
+      ))}
+      {missing.map((name) => (
+        <Badge key={name} variant="destructive">
+          缺少 {name}
+        </Badge>
+      ))}
+    </div>
+  )
+}
+
+function EngineCard({ engine }: { engine: EngineStatus }): React.JSX.Element {
+  const checkedOut =
+    engine.id === 'realbasicvsr'
+      ? '内置'
+      : engine.present
+        ? `已检出 ${shortCommit(engine.commit)}`
+        : '未检出'
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{engine.name}</CardTitle>
+        <CardDescription>{engine.model_dir}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <Row label="检出" value={checkedOut} />
+        <Row label="虚拟环境" value={engine.venv_ready ? '已就绪' : '未安装'} />
+        {engine.commit_expected ? (
+          <Row label="期望提交" value={shortCommit(engine.commit_expected)} />
+        ) : null}
+        <Row label="说明" value={engine.detail || '—'} />
+        <WeightBadges present={engine.models_present} missing={engine.models_missing} />
+      </CardContent>
+    </Card>
+  )
 }
 
 function Row({ label, value }: { label: string; value: string }): React.JSX.Element {
@@ -84,45 +133,40 @@ export function SystemPage({ connected, system, onRefresh }: SystemPageProps): R
               )}
             </CardContent>
           </Card>
-          <Card className="lg:col-span-2">
-            <CardHeader>
-              <CardTitle>SeedVR2</CardTitle>
-              <CardDescription>{system.model_dir}</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <Row
-                label="检出"
-                value={
-                  system.seedvr2_present ? `已检出 ${shortCommit(system.seedvr2_commit)}` : '未检出'
-                }
-              />
-              <Row label="期望提交" value={shortCommit(system.seedvr2_commit_expected)} />
-              <div className="flex flex-wrap gap-2 pt-1">
-                {system.models_present.map((name) => (
-                  <Badge key={name} variant="secondary">
-                    {name}
-                  </Badge>
-                ))}
-                {system.models_missing.map((name) => (
-                  <Badge key={name} variant="destructive">
-                    缺少 {name}
-                  </Badge>
-                ))}
-              </div>
-              {system.warnings.length > 0 ? (
-                <Alert variant="destructive">
-                  <AlertTitle>注意</AlertTitle>
-                  <AlertDescription>
-                    <ul className="list-disc space-y-1 pl-4">
-                      {system.warnings.map((warning) => (
-                        <li key={warning}>{warning}</li>
-                      ))}
-                    </ul>
-                  </AlertDescription>
-                </Alert>
-              ) : null}
-            </CardContent>
-          </Card>
+          {system.engines && system.engines.length > 0 ? (
+            system.engines.map((engine) => <EngineCard key={engine.id} engine={engine} />)
+          ) : (
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <CardTitle>SeedVR2</CardTitle>
+                <CardDescription>{system.model_dir}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <Row
+                  label="检出"
+                  value={
+                    system.seedvr2_present
+                      ? `已检出 ${shortCommit(system.seedvr2_commit)}`
+                      : '未检出'
+                  }
+                />
+                <Row label="期望提交" value={shortCommit(system.seedvr2_commit_expected)} />
+                <WeightBadges present={system.models_present} missing={system.models_missing} />
+              </CardContent>
+            </Card>
+          )}
+          {system.warnings.length > 0 ? (
+            <Alert variant="destructive" className="lg:col-span-2">
+              <AlertTitle>注意</AlertTitle>
+              <AlertDescription>
+                <ul className="list-disc space-y-1 pl-4">
+                  {system.warnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
+              </AlertDescription>
+            </Alert>
+          ) : null}
         </div>
       )}
     </div>

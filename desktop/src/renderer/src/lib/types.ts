@@ -1,7 +1,7 @@
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
 
 export type EventType =
-  'queued' | 'stage' | 'log' | 'progress' | 'completed' | 'failed' | 'cancelled'
+  'queued' | 'stage' | 'log' | 'progress' | 'preview' | 'completed' | 'failed' | 'cancelled'
 
 export type MediaKind = 'video' | 'image'
 
@@ -30,12 +30,26 @@ export interface ProgressEvent {
   message: string
   progress: number | null
   stage: string | null
+  preview_frame?: number | null
 }
 
 export interface GpuReport {
   index: number
   name: string
   memory_mib: number
+}
+
+export interface EngineStatus {
+  id: string
+  name: string
+  present: boolean
+  commit: string | null
+  commit_expected: string | null
+  venv_ready: boolean
+  model_dir: string
+  models_present: string[]
+  models_missing: string[]
+  detail: string
 }
 
 export interface SystemReport {
@@ -52,6 +66,7 @@ export interface SystemReport {
   model_dir: string
   models_present: string[]
   models_missing: string[]
+  engines?: EngineStatus[]
   ready: boolean
   warnings: string[]
 }
@@ -80,6 +95,7 @@ export interface EngineManifest {
   description: string
   capabilities: string[]
   media?: MediaKind[]
+  device_policy?: 'multi' | 'single'
   params_schema: {
     type?: string
     properties?: Record<string, SchemaProperty>
@@ -91,4 +107,5 @@ export interface SessionJob {
   record: JobRecord
   logs: string[]
   message: string
+  previewFrame?: number | null
 }

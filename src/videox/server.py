@@ -6,7 +6,7 @@ from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from videox import __version__
@@ -80,6 +80,15 @@ def create_app(runner: JobRunner | None = None) -> FastAPI:
             return runner.cancel(job_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="任务不存在") from exc
+
+    @app.get("/jobs/{job_id}/preview/{kind}")
+    def job_preview(job_id: str, kind: Literal["source", "output"]) -> FileResponse:
+        if runner.store.get(job_id) is None:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        path = runner.preview_directory(job_id) / f"{kind}.jpg"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="预览还不存在")
+        return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @app.get("/jobs/{job_id}/events")
     async def job_events(job_id: str, request: Request):

@@ -125,7 +125,12 @@ class JobRunner:
                 info = probe_media(source)
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 engine_output = video_only_path(dest)
-            weights = model_dir(self.project_root)
+            model_directory = getattr(engine, "model_directory", None)
+            weights = (
+                model_directory(self.project_root)
+                if callable(model_directory)
+                else model_dir(self.project_root)
+            )
             weights.mkdir(parents=True, exist_ok=True)
             ctx = EngineContext(
                 project_root=self.project_root,
@@ -133,6 +138,9 @@ class JobRunner:
                 model_dir=weights,
                 gpus=None,
             )
+            resolve_python = getattr(engine, "resolve_python", None)
+            if callable(resolve_python):
+                ctx.python_executable = resolve_python(ctx)
             engine_spec = spec.model_copy(update={"output_path": str(engine_output)})
             command = engine.build_command(engine_spec, ctx)
             workdir = engine.working_directory(ctx)
@@ -203,6 +211,9 @@ class JobRunner:
             }
         )
 
+    def preview_directory(self, job_id: str) -> Path:
+        return self.project_root / "output" / ".previews" / job_id
+
     def _emit(self, event: ProgressEvent, echo: Callable[[str], None] | None) -> None:
         self.store.publish(event)
         if echo is None or not event.message:
@@ -232,6 +243,9 @@ class JobRunner:
         )
         env = os.environ.copy()
         env.update(engine.subprocess_env(ctx))
+        preview_dir = self.preview_directory(job_id)
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        env["VIDEOX_PREVIEW_DIR"] = str(preview_dir)
         creationflags = 0
         if os.name == "nt":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -255,8 +269,18 @@ class JobRunner:
                 text = line.rstrip("\r\n")
                 if not text:
                     continue
-                self._emit(ProgressEvent(job_id=job_id, type=EventType.log, message=text), echo)
                 insight = engine.parse_log_line(text)
+                if insight is not None and insight.preview_frame is not None:
+                    self._emit(
+                        ProgressEvent(
+                            job_id=job_id,
+                            type=EventType.preview,
+                            preview_frame=insight.preview_frame,
+                        ),
+                        echo,
+                    )
+                    continue
+                self._emit(ProgressEvent(job_id=job_id, type=EventType.log, message=text), echo)
                 if insight is None:
                     continue
                 if insight.stage:

@@ -10,6 +10,8 @@ output/
 tools/
 .work/
 third_party/seedvr2/
+third_party/flashvsr/
+third_party/swiftvr/
 desktop/node_modules/
 desktop/out/
 desktop/dist/

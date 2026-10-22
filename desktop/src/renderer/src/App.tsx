@@ -4,7 +4,9 @@ import { AppShell, type AppPage } from '@/components/app-shell'
 import { ImagePage } from '@/components/image-page'
 import { RestorePage } from '@/components/restore-page'
 import { SystemPage } from '@/components/system-page'
+import { TasksPage } from '@/components/tasks-page'
 import { Toaster } from '@/components/ui/sonner'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import { getEngines, getSystem } from '@/lib/api'
 import { useSessionJobs } from '@/hooks/use-session-jobs'
 import type { EngineManifest, SystemReport } from '@/lib/types'
@@ -52,7 +54,7 @@ function App(): React.JSX.Element {
   }, [refresh, reloadKey])
 
   return (
-    <>
+    <TooltipProvider>
       <AppShell
         page={page}
         onPageChange={setPage}
@@ -65,12 +67,19 @@ function App(): React.JSX.Element {
         }}
         onStartingChange={setStarting}
       >
-        <div className={page === 'restore' ? 'block' : 'hidden'}>
+        <div className={page === 'restore' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
           <RestorePage
             connected={connected}
             projectRoot={server?.projectRoot ?? system?.project_root}
             system={system}
             engines={engines}
+            onJobsChange={setJobs}
+            onSelectJob={selectJob}
+            onOpenTasks={() => setPage('tasks')}
+          />
+        </div>
+        <div className={page === 'tasks' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+          <TasksPage
             jobs={jobs}
             selectedId={selectedId}
             onJobsChange={setJobs}
@@ -98,7 +107,7 @@ function App(): React.JSX.Element {
         </div>
       </AppShell>
       <Toaster />
-    </>
+    </TooltipProvider>
   )
 }
 

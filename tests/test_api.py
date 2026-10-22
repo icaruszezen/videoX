@@ -15,11 +15,17 @@ def test_engines_and_missing_input(tmp_path, monkeypatch):
     engines = client.get("/engines")
     assert engines.status_code == 200
     body = engines.json()
-    assert body[0]["id"] == "seedvr2"
+    assert [item["id"] for item in body] == ["seedvr2", "flashvsr", "swiftvr", "realbasicvsr"]
     assert "upscale" in body[0]["capabilities"]
     assert body[0]["media"] == ["video", "image"]
+    assert body[0]["device_policy"] == "multi"
     assert "dit_model" in body[0]["params_schema"]["properties"]
     assert body[0]["params_schema"]["properties"]["batch_size"]["media"] == ["video"]
+    flash = body[1]
+    assert flash["media"] == ["video"]
+    assert flash["device_policy"] == "single"
+    assert flash["params_schema"]["properties"]["mode"]["default"] == "tiny-long"
+    assert "dit_model" not in flash["params_schema"]["properties"]
 
     created = client.post(
         "/jobs",
@@ -39,4 +45,11 @@ def test_engines_and_missing_input(tmp_path, monkeypatch):
 
     system = client.get("/system")
     assert system.status_code == 200
-    assert system.json()["project_root"] == str(root)
+    payload = system.json()
+    assert payload["project_root"] == str(root)
+    assert [item["id"] for item in payload["engines"]] == [
+        "seedvr2",
+        "flashvsr",
+        "swiftvr",
+        "realbasicvsr",
+    ]

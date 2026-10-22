@@ -38,18 +38,22 @@ def run(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="videox", description="本地视频修复")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    setup_parser = sub.add_parser("setup", help="准备虚拟环境、ffmpeg 和 SeedVR2")
+    setup_parser = sub.add_parser("setup", help="准备虚拟环境、ffmpeg 和修复引擎")
     setup_parser.add_argument("--in-venv", action="store_true", help=argparse.SUPPRESS)
 
     sub.add_parser("doctor", help="检查本机能否运行")
 
-    restore_parser = sub.add_parser("restore", help="用 SeedVR2 修复一段视频")
+    restore_parser = sub.add_parser("restore", help="修复一段视频或图片")
     restore_parser.add_argument("input")
     restore_parser.add_argument("-o", "--output")
-    restore_parser.add_argument("--resolution", type=int)
+    restore_parser.add_argument("--resolution", type=int, help="短边分辨率，只对 SeedVR2 生效")
     restore_parser.add_argument("--devices", help="CUDA 设备号，例如 0,1")
-    restore_parser.add_argument("--batch-size", type=int)
-    restore_parser.add_argument("--engine", default="seedvr2")
+    restore_parser.add_argument("--batch-size", type=int, help="批大小，只对 SeedVR2 生效")
+    restore_parser.add_argument(
+        "--engine",
+        default="seedvr2",
+        help="引擎：seedvr2、flashvsr、swiftvr、realbasicvsr",
+    )
 
     serve_parser = sub.add_parser("serve", help="启动给以后界面使用的本地 API")
     serve_parser.add_argument("--host", default="127.0.0.1")
@@ -78,13 +82,12 @@ def _restore(args: argparse.Namespace) -> int:
     root = project_root()
     source = Path(args.input)
     media = "image" if is_image_path(source) else "video"
-    suffix = ".png" if media == "image" else ".mp4"
-    output = Path(args.output) if args.output else root / "output" / f"{source.stem}.seedvr2{suffix}"
-    params: dict = {}
-    if args.resolution is not None:
-        params["resolution"] = args.resolution
-    if args.batch_size is not None:
-        params["batch_size"] = args.batch_size
+    output = (
+        Path(args.output)
+        if args.output
+        else default_restore_output(root, source, args.engine, media)
+    )
+    params = restore_params(args.engine, args.resolution, args.batch_size)
     spec = JobSpec(
         engine_id=args.engine,
         input_path=str(source),
@@ -100,6 +103,22 @@ def _restore(args: argparse.Namespace) -> int:
         return 1
     print(f"完成: {record.spec.output_path}")
     return 0
+
+
+def default_restore_output(root: Path, source: Path, engine_id: str, media: str) -> Path:
+    suffix = ".png" if media == "image" else ".mp4"
+    return root / "output" / f"{source.stem}.{engine_id}{suffix}"
+
+
+def restore_params(engine_id: str, resolution: int | None, batch_size: int | None) -> dict:
+    if engine_id != "seedvr2":
+        return {}
+    params: dict = {}
+    if resolution is not None:
+        params["resolution"] = resolution
+    if batch_size is not None:
+        params["batch_size"] = batch_size
+    return params
 
 
 def main(argv: list[str] | None = None) -> None:

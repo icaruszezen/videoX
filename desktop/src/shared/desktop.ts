@@ -14,4 +14,6 @@ export interface DesktopApi {
   serverStatus: () => Promise<ServerState>
   serverStart: () => Promise<ServerState>
   serverStop: () => Promise<ServerState>
+  readJobIds: () => Promise<string[]>
+  writeJobIds: (ids: string[]) => Promise<void>
 }

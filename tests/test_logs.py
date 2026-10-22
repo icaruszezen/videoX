@@ -17,3 +17,14 @@ def test_progress_json_maps_onto_phase_range():
     assert insight is not None
     assert insight.stage == "upscaling"
     assert insight.progress == 0.20 + 0.25 * 0.5
+    assert insight.preview_frame is None
+
+
+def test_preview_json_carries_the_frame_without_progress():
+    insight = parse_seedvr2_line('{"videox_preview": {"frame": 12}}')
+    assert insight is not None
+    assert insight.preview_frame == 12
+    assert insight.progress is None
+    assert insight.stage is None
+    assert parse_seedvr2_line('{"videox_preview": {"frame": 0}}') is None
+    assert parse_seedvr2_line('{"videox_preview": {}}') is None

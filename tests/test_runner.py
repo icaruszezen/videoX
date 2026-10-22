@@ -1,7 +1,9 @@
+import queue
 import sys
 from pathlib import Path
 
 from videox.engines.base import EngineContext, LogInsight
+from videox.engines.seedvr2.logs import parse_seedvr2_line
 from videox.errors import VideoXError
 from videox.jobs.models import EngineManifest, JobSpec, JobStatus
 from videox.jobs.runner import JobRunner
@@ -167,6 +169,51 @@ def test_resolve_media_follows_the_requested_kind(tmp_path: Path):
     assert resolve_media("image", tmp_path / "still.png") == "image"
     with pytest.raises(VideoXError, match="图片文件"):
         resolve_media("video", tmp_path / "still.webp")
+
+
+def test_runner_publishes_preview_frames_outside_the_log(tmp_path: Path, monkeypatch):
+    source = tmp_path / "in.mp4"
+    source.write_bytes(b"in")
+    dest = tmp_path / "out.mp4"
+    monkeypatch.setattr(
+        "videox.jobs.runner.probe_media",
+        lambda path: MediaInfo(has_audio=False),
+    )
+
+    class ParsingEngine(FakeEngine):
+        def parse_log_line(self, line: str) -> LogInsight | None:
+            return parse_seedvr2_line(line)
+
+    registry = EngineRegistry()
+    registry.register(ParsingEngine([sys.executable, "-c", _PREVIEW_SCRIPT]))
+    runner = JobRunner(registry, JobStore(), tmp_path)
+    record = runner.submit(
+        JobSpec(engine_id="fake", input_path=str(source), output_path=str(dest)),
+        background=False,
+    )
+    assert record.status == JobStatus.completed
+    assert (tmp_path / "output" / ".previews" / record.id).is_dir()
+    subscription = runner.store.subscribe(record.id)
+    events = []
+    while True:
+        try:
+            events.append(subscription.get_nowait())
+        except queue.Empty:
+            break
+    previews = [event for event in events if event.type.value == "preview"]
+    logged = [event.message for event in events if event.type.value == "log"]
+    assert [event.preview_frame for event in previews] == [4]
+    assert '{"videox_preview": {"frame": 4}}' not in logged
+    assert "hello" in logged
+
+
+_PREVIEW_SCRIPT = """
+print("hello", flush=True)
+print('{"videox_preview": {"frame": 4}}', flush=True)
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_bytes(b"vid")
+"""
 
 
 def test_runner_reports_engine_failure(tmp_path: Path, monkeypatch):

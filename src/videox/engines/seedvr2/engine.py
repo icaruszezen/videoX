@@ -37,6 +37,7 @@ class SeedVR2Engine:
             description="一步扩散修复，支持视频和图片。双卡按帧分段，每张卡各加载一份 3B FP8 模型。",
             capabilities=["upscale"],
             media=["video", "image"],
+            device_policy="multi",
             params_schema=params_schema(),
         )
 

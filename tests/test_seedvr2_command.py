@@ -69,6 +69,12 @@ def test_schema_exposes_shared_and_video_only_fields():
     assert properties["use_10bit"]["media"] == ["video"]
     assert properties["output_format"]["media"] == ["video"]
     assert schema.params_schema["groups"][1]["title"] == "画质"
+    for name, prop in properties.items():
+        assert prop.get("description"), name
+        if name == "batch_size":
+            assert "default" not in prop
+        else:
+            assert "default" in prop, name
 
 
 def test_image_command_skips_video_flags(tmp_path: Path):

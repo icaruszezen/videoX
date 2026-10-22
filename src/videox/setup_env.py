@@ -8,9 +8,34 @@ import zipfile
 from pathlib import Path
 
 from videox.errors import VideoXError
-from videox.paths import bundled_ffmpeg, project_root, read_expected_rev, seedvr2_dir, tool_executable
+from videox.paths import (
+    bundled_ffmpeg,
+    flashvsr_dir,
+    flashvsr_rev_file,
+    project_root,
+    read_expected_rev,
+    read_rev_file,
+    seedvr2_dir,
+    swiftvr_dir,
+    swiftvr_rev_file,
+    tool_executable,
+    venv_python,
+)
 
 SEEDVR2_URL = "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git"
+FLASHVSR_URL = "https://github.com/OpenImagingLab/FlashVSR.git"
+SWIFTVR_URL = "https://github.com/H-oliday/SwiftVR.git"
+BLOCK_SPARSE_URL = "https://github.com/mit-han-lab/Block-Sparse-Attention.git"
+_SKIP_REQUIREMENTS = {
+    "flash-attn",
+    "sageattention",
+    "apex",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "block-sparse-attention",
+    "block-sparse-attn",
+}
 FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
 TORCH_INDEXES = (
     "https://download.pytorch.org/whl/cu128",
@@ -71,18 +96,28 @@ def ensure_ffmpeg(root: Path) -> None:
         raise VideoXError("ffmpeg 已解压，但没有找到 ffmpeg.exe / ffprobe.exe")
 
 
-def ensure_seedvr2(root: Path) -> None:
-    revision = read_expected_rev(root)
-    destination = seedvr2_dir(root)
+def ensure_checkout(url: str, destination: Path, revision: str, label: str) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not (destination / ".git").exists():
         if destination.exists():
             raise VideoXError(f"{destination} 已存在但不是 git 检出，请移走后重试")
-        _say(f"正在克隆 SeedVR2 到 {destination}")
-        _run(["git", "clone", SEEDVR2_URL, str(destination)])
-    _say(f"正在检出 SeedVR2 {revision}")
+        _say(f"正在克隆 {label} 到 {destination}")
+        _run(["git", "clone", url, str(destination)])
+    _say(f"正在检出 {label} {revision}")
     _run(["git", "fetch", "--tags", "origin"], cwd=destination)
     _run(["git", "checkout", "--detach", revision], cwd=destination)
+
+
+def ensure_seedvr2(root: Path) -> None:
+    ensure_checkout(SEEDVR2_URL, seedvr2_dir(root), read_expected_rev(root), "SeedVR2")
+
+
+def ensure_flashvsr(root: Path) -> None:
+    ensure_checkout(FLASHVSR_URL, flashvsr_dir(root), read_rev_file(flashvsr_rev_file(root)), "FlashVSR")
+
+
+def ensure_swiftvr(root: Path) -> None:
+    ensure_checkout(SWIFTVR_URL, swiftvr_dir(root), read_rev_file(swiftvr_rev_file(root)), "SwiftVR")
 
 
 def _cuda_ready(python: str) -> bool:
@@ -121,25 +156,100 @@ def install_torch(python: str) -> None:
     raise last_error or VideoXError("无法安装带 CUDA 的 PyTorch")
 
 
-def install_seedvr_requirements(root: Path, python: str) -> None:
-    requirements = seedvr2_dir(root) / "requirements.txt"
-    if not requirements.is_file():
-        raise VideoXError(f"缺少 {requirements}")
-    filtered = root / ".work" / "seedvr2-requirements.txt"
+def _filter_requirements(requirements: Path, filtered: Path) -> None:
     filtered.parent.mkdir(parents=True, exist_ok=True)
     kept: list[str] = []
     for line in requirements.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         name = stripped.split("[", 1)[0].split("=", 1)[0].split("<", 1)[0].split(">", 1)[0].strip()
         normalized = name.lower().replace("_", "-")
-        if normalized in {"flash-attn", "sageattention", "apex"}:
-            continue
-        if normalized in {"torch", "torchvision", "torchaudio"}:
+        if normalized in _SKIP_REQUIREMENTS:
             continue
         kept.append(line)
     filtered.write_text("\n".join(kept) + "\n", encoding="utf-8")
+
+
+def install_seedvr_requirements(root: Path, python: str) -> None:
+    requirements = seedvr2_dir(root) / "requirements.txt"
+    if not requirements.is_file():
+        raise VideoXError(f"缺少 {requirements}")
+    filtered = root / ".work" / "seedvr2-requirements.txt"
+    _filter_requirements(requirements, filtered)
     _say("正在安装 SeedVR2 依赖，不编译 flash-attn")
     _run([python, "-m", "pip", "install", "-r", str(filtered)])
+
+
+def install_engine_venv(root: Path, engine_dir: Path, label: str) -> str:
+    python = venv_python(engine_dir)
+    if not python.exists():
+        _say(f"正在为 {label} 创建虚拟环境")
+        _run([sys.executable, "-m", "venv", str(engine_dir / ".venv")])
+    _run([str(python), "-m", "pip", "install", "--upgrade", "pip"])
+    _run([str(python), "-m", "pip", "install", "setuptools<82", "pydantic>=2.9"])
+    install_torch(str(python))
+    _say(f"正在安装 {label}")
+    # Upstream setup.py imports pkg_resources and also pins an older torch.
+    # Install the package itself without those dependencies.
+    _run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "-e",
+            str(engine_dir),
+            "--no-deps",
+            "--no-build-isolation",
+        ]
+    )
+    requirements = engine_dir / "requirements.txt"
+    if requirements.is_file():
+        filtered = root / ".work" / f"{label.lower()}-requirements.txt"
+        _filter_requirements(requirements, filtered)
+        _run([str(python), "-m", "pip", "install", "-r", str(filtered)])
+    return str(python)
+
+
+def install_block_sparse(root: Path, python: str) -> None:
+    destination = root / ".work" / "Block-Sparse-Attention"
+    marker = flashvsr_dir(root) / ".videox-sparse"
+    try:
+        if not (destination / "setup.py").is_file():
+            if destination.exists():
+                shutil.rmtree(destination)
+            _say("正在克隆 Block-Sparse-Attention")
+            _run(["git", "clone", "--depth", "1", BLOCK_SPARSE_URL, str(destination)])
+        _run([python, "-m", "pip", "install", "packaging", "ninja"])
+        _say("正在编译 Block-Sparse-Attention")
+        _run([python, "setup.py", "install"], cwd=destination)
+    except VideoXError as exc:
+        marker.write_text("missing\n", encoding="utf-8")
+        _say(f"Block-Sparse-Attention 编译失败，FlashVSR 将使用整块注意力: {exc}")
+        return
+    probe = subprocess.run(
+        [python, "-c", "import torch; import block_sparse_attn"],
+        check=False,
+    )
+    marker.write_text("ready\n" if probe.returncode == 0 else "missing\n", encoding="utf-8")
+    if probe.returncode != 0:
+        _say("Block-Sparse-Attention 没有导入成功，FlashVSR 将使用整块注意力。")
+
+
+def install_optional_engines(root: Path) -> None:
+    errors: list[str] = []
+    try:
+        ensure_flashvsr(root)
+        python = install_engine_venv(root, flashvsr_dir(root), "FlashVSR")
+        install_block_sparse(root, python)
+    except VideoXError as exc:
+        errors.append(f"FlashVSR: {exc}")
+    try:
+        ensure_swiftvr(root)
+        install_engine_venv(root, swiftvr_dir(root), "SwiftVR")
+    except VideoXError as exc:
+        errors.append(f"SwiftVR: {exc}")
+    if errors:
+        raise VideoXError("部分引擎没有装好:\n" + "\n".join(errors))
 
 
 def bootstrap_venv(root: Path) -> int:
@@ -170,5 +280,6 @@ def setup_environment(root: Path | None = None, *, in_venv: bool = False) -> int
     install_seedvr_requirements(root, sys.executable)
     if not _cuda_ready(sys.executable):
         install_torch(sys.executable)
+    install_optional_engines(root)
     _say("环境已准备好。接下来可以运行 videox doctor。")
     return 0

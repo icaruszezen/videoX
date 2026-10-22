@@ -1,13 +1,21 @@
 import type { ReactNode } from 'react'
-import { ClapperboardIcon, CpuIcon, ImageIcon } from 'lucide-react'
+import { ClapperboardIcon, CpuIcon, ImageIcon, ListVideoIcon } from 'lucide-react'
 import { toast } from 'sonner'
 
+import logo from '@/assets/logo.png'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { cn } from 'cn'
 import type { ServerState } from '../../../shared/desktop'
 
-export type AppPage = 'restore' | 'image' | 'system'
+export type AppPage = 'restore' | 'tasks' | 'image' | 'system'
+
+const PAGE_TITLE: Record<AppPage, string> = {
+  restore: '修复',
+  tasks: '任务',
+  image: '图片',
+  system: '系统'
+}
 
 interface AppShellProps {
   page: AppPage
@@ -68,9 +76,12 @@ export function AppShell({
   return (
     <div className="flex h-full bg-background text-foreground">
       <aside className="flex w-60 shrink-0 flex-col border-r bg-card">
-        <div className="px-4 py-5">
-          <div className="text-lg font-semibold tracking-tight">VideoX</div>
-          <div className="text-xs text-muted-foreground">本地视频修复</div>
+        <div className="flex items-center gap-3 px-4 py-5">
+          <img src={logo} alt="" className="size-10 shrink-0 rounded-xl" />
+          <div>
+            <div className="text-lg font-semibold tracking-tight">VideoX</div>
+            <div className="text-xs text-muted-foreground">本地视频修复</div>
+          </div>
         </div>
         <nav className="flex flex-col gap-1 px-3">
           <Button
@@ -80,6 +91,14 @@ export function AppShell({
           >
             <ClapperboardIcon data-icon="inline-start" />
             修复
+          </Button>
+          <Button
+            variant={page === 'tasks' ? 'secondary' : 'ghost'}
+            className="justify-start"
+            onClick={() => onPageChange('tasks')}
+          >
+            <ListVideoIcon data-icon="inline-start" />
+            任务
           </Button>
           <Button
             variant={page === 'image' ? 'secondary' : 'ghost'}
@@ -131,14 +150,19 @@ export function AppShell({
       </aside>
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex h-14 items-center justify-between border-b px-6">
-          <h1 className="text-base font-medium">
-            {page === 'restore' ? '修复' : page === 'image' ? '图片' : '系统'}
-          </h1>
+          <h1 className="text-base font-medium">{PAGE_TITLE[page]}</h1>
           <span className={cn('text-xs text-muted-foreground')}>
             {connected ? 'API 可用' : '等待本地 API'}
           </span>
         </header>
-        <div className="min-h-0 flex-1 overflow-auto p-6">{children}</div>
+        <div
+          className={cn(
+            'flex min-h-0 flex-1 flex-col p-6',
+            page === 'tasks' || page === 'restore' ? 'overflow-hidden' : 'overflow-auto'
+          )}
+        >
+          {children}
+        </div>
       </main>
     </div>
   )

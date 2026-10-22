@@ -72,6 +72,10 @@ export function createJob(body: CreateJobBody): Promise<JobRecord> {
   return request('/jobs', { method: 'POST', body: JSON.stringify(body) })
 }
 
+export function getJob(jobId: string): Promise<JobRecord> {
+  return request(`/jobs/${jobId}`)
+}
+
 export function cancelJob(jobId: string): Promise<JobRecord> {
   return request(`/jobs/${jobId}/cancel`, { method: 'POST' })
 }

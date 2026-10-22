@@ -8,7 +8,9 @@ const api: DesktopApi = {
     ipcRenderer.invoke('dialog:pick-output', defaultPath, kind),
   serverStatus: () => ipcRenderer.invoke('server:status'),
   serverStart: () => ipcRenderer.invoke('server:start'),
-  serverStop: () => ipcRenderer.invoke('server:stop')
+  serverStop: () => ipcRenderer.invoke('server:stop'),
+  readJobIds: () => ipcRenderer.invoke('session:read-jobs'),
+  writeJobIds: (ids) => ipcRenderer.invoke('session:write-jobs', ids)
 }
 
 if (process.contextIsolated) {

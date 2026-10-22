@@ -5,6 +5,7 @@ export const EVENT_TYPES = [
   'stage',
   'log',
   'progress',
+  'preview',
   'completed',
   'failed',
   'cancelled'
@@ -96,15 +97,17 @@ export function suggestOutput(
   inputPath: string,
   projectRoot?: string,
   media: MediaKind = 'video',
-  outputFormat: 'mp4' | 'png' = 'mp4'
+  outputFormat: 'mp4' | 'png' = 'mp4',
+  engineId = 'seedvr2'
 ): string {
   const stem = fileStem(inputPath)
+  const tag = engineId || 'seedvr2'
   const name =
     media === 'image'
-      ? `${stem}.seedvr2.png`
+      ? `${stem}.${tag}.png`
       : outputFormat === 'png'
         ? stem
-        : `${stem}.seedvr2.mp4`
+        : `${stem}.${tag}.mp4`
   const root = projectRoot?.replace(/[/\\]+$/, '')
   if (root) {
     const sep = root.includes('\\') ? '\\' : '/'
@@ -124,6 +127,17 @@ export function formatTime(iso: string): string {
 export function formatMemory(mib: number): string {
   if (mib >= 1024) return `${(mib / 1024).toFixed(1)} GB`
   return `${mib} MiB`
+}
+
+export function recommendedBatchSize(
+  gpus: Array<{ index: number; memory_mib: number }>,
+  selectedDevices: number[]
+): number {
+  const pool =
+    selectedDevices.length > 0 ? gpus.filter((gpu) => selectedDevices.includes(gpu.index)) : gpus
+  if (pool.length === 0) return 5
+  const smallest = Math.min(...pool.map((gpu) => gpu.memory_mib))
+  return smallest >= 15 * 1024 ? 9 : 5
 }
 
 export function shortCommit(commit: string | null): string {
@@ -154,13 +168,20 @@ export function applyProgress(job: SessionJob, event: ProgressEvent, logs: strin
     record.error = null
   }
   if (
-    (event.type === 'stage' || event.type === 'log' || event.type === 'progress') &&
+    (event.type === 'stage' ||
+      event.type === 'log' ||
+      event.type === 'progress' ||
+      event.type === 'preview') &&
     record.status === 'queued'
   ) {
     record.status = 'running'
   }
   const message = event.type === 'log' ? job.message : event.message || job.message
-  return { record, logs, message }
+  const previewFrame =
+    event.type === 'preview' && event.preview_frame != null
+      ? event.preview_frame
+      : (job.previewFrame ?? null)
+  return { record, logs, message, previewFrame }
 }
 
 export function isSimpleProperty(property: SchemaProperty): boolean {
