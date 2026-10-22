@@ -45,10 +45,18 @@ export function JobLog({
   useEffect(() => {
     const viewport = viewportOf(contentRef.current)
     if (!viewport) return
+    let lastTop = viewport.scrollTop
     const onScroll = (): void => {
-      const gap = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-      const atBottom = gap <= FOLLOW_SLACK
-      setFrozen((current) => (atBottom ? null : (current ?? latest.current)))
+      const top = viewport.scrollTop
+      const gap = viewport.scrollHeight - top - viewport.clientHeight
+      const movedUp = top < lastTop
+      lastTop = top
+      // Snapping to the end never lowers scrollTop, and a shrinking log clamps it
+      // to the end, so an upward move with room below is the reader scrolling.
+      // Freeze right away instead of waiting for a bigger gap, or the next
+      // update would snap back and undo small trackpad or smooth scrolls.
+      if (movedUp && gap > 1) setFrozen((current) => current ?? latest.current)
+      else if (gap <= FOLLOW_SLACK) setFrozen(null)
     }
     // The page can be hidden (display:none) while lines arrive, and the window
     // can be resized. Either way, a log that follows the output stays at the end.

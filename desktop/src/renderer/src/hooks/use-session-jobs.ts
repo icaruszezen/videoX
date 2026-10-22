@@ -100,7 +100,17 @@ export function useSessionJobs(connected: boolean): SessionJobsState {
         }
       }
       if (!active || records.length === 0) return
-      setJobs((current) => (current.length > 0 ? current : records.map(sessionJob)))
+      const restored = records.map(sessionJob)
+      setJobs((current) => (current.length > 0 ? current : restored))
+      // Pin what the pages show first, so a restored job that finishes stays on
+      // screen instead of the view moving on to another job.
+      setPicks((current) =>
+        current.length > 0
+          ? current
+          : (['video', 'image'] as const)
+              .map((media) => selectedFor(restored, [], media))
+              .filter((id): id is string => id !== null)
+      )
     })()
     return () => {
       active = false
@@ -167,6 +177,7 @@ function useJobStream(jobId: string | null, connected: boolean, setJobs: SetJobs
     let finished = false
     const logs: string[] = []
     let offset = 0
+    let synced = false
     let queue: ProgressEvent[] = []
     let timer = 0
     let retryTimer = 0
@@ -176,9 +187,11 @@ function useJobStream(jobId: string | null, connected: boolean, setJobs: SetJobs
       if (!active || queue.length === 0) return
       const batch = queue
       queue = []
+      let added = 0
       for (const payload of batch) {
         if (payload.type === 'log' && payload.message && !isProtocolLine(payload.message)) {
           logs.push(payload.message)
+          added += 1
         }
       }
       if (logs.length > LOG_LIMIT) {
@@ -186,7 +199,10 @@ function useJobStream(jobId: string | null, connected: boolean, setJobs: SetJobs
         logs.splice(0, dropped)
         offset += dropped
       }
-      const snapshot = logs.slice()
+      // Most batches only carry progress. Keep the same log array then, so the
+      // log view does not re-render or re-scroll for nothing.
+      const snapshot = added > 0 || !synced ? logs.slice() : null
+      synced = true
       const logOffset = offset
       setJobs((current) =>
         current.map((job) => {
@@ -195,7 +211,7 @@ function useJobStream(jobId: string | null, connected: boolean, setJobs: SetJobs
           for (const payload of batch) {
             if (payload.job_id === jobId) next = applyProgress(next, payload)
           }
-          return { ...next, logs: snapshot, logOffset }
+          return snapshot ? { ...next, logs: snapshot, logOffset } : next
         })
       )
     }

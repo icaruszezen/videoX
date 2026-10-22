@@ -221,7 +221,7 @@ export function MediaTaskPage({
                   className={cn(
                     'flex items-center gap-3 rounded-lg border px-3 py-2 text-left outline-none hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50',
                     job.record.id === selected?.record.id &&
-                      'border-primary/70 bg-muted hover:bg-muted'
+                      'border-primary/70 bg-muted/60 hover:bg-muted/60'
                   )}
                   onClick={() => onSelectJob(job.record.id)}
                 >

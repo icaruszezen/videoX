@@ -68,7 +68,7 @@ export function TasksPage({
                     aria-current={active ? 'true' : undefined}
                     className={cn(
                       'flex min-w-0 flex-col gap-2 rounded-lg border px-3 py-2 text-left outline-none hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50',
-                      active && 'border-primary/70 bg-muted hover:bg-muted'
+                      active && 'border-primary/70 bg-muted/60 hover:bg-muted/60'
                     )}
                     onClick={() => onSelectJob(job.record.id)}
                   >
@@ -171,7 +171,7 @@ function TaskDetail({
           lines={job.logs}
           offset={job.logOffset}
           finished={finished}
-          className="min-h-40 flex-1"
+          className="min-h-32 flex-1"
         />
       </CardContent>
     </Card>

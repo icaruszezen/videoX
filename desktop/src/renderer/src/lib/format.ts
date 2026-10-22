@@ -211,10 +211,12 @@ export function applyProgress(job: SessionJob, event: ProgressEvent): SessionJob
   ) {
     record.status = 'running'
   }
+  // Protocol lines are never shown. The runner's own '正在读取…' only describes
+  // the prepare step, so drop it once the job moves on, in case the engine
+  // reports nothing readable after that.
+  const kept = job.record.stage === 'prepare' && record.stage !== 'prepare' ? '' : job.message
   const message =
-    event.type === 'log' || isProtocolLine(event.message)
-      ? job.message
-      : event.message || job.message
+    event.type === 'log' || isProtocolLine(event.message) ? kept : event.message || kept
   return { ...job, record, message, previewFrame }
 }
 
