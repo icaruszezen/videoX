@@ -6,7 +6,7 @@
 - **命令行和本机 API**：`videox` 命令和 FastAPI 服务共用同一套任务执行逻辑。
 - **桌面界面**（`desktop/`，Electron）：通过本机 API 提交任务、查看进度，并把处理中的一帧和原片并排对比。
 
-目前内置四个引擎：SeedVR2、FlashVSR、SwiftVR、RealBasicVSR。所有处理都在本机 NVIDIA 显卡上完成。
+目前内置八个引擎：SeedVR2、FlashVSR、SwiftVR、RealBasicVSR 处理视频（SeedVR2 也能处理图片），Real-ESRGAN、SwinIR、SCUNet、GFPGAN 只处理图片。所有处理都在本机 NVIDIA 显卡上完成。
 
 ## 引擎
 
@@ -16,11 +16,16 @@
 | FlashVSR v1.1 | 一步扩散超分 | 视频 | 单卡 | 4 倍（可选 2 倍），宽高裁到 128 的倍数 | 独立虚拟环境 |
 | SwiftVR | 一步生成式修复，面向实时超分 | 视频 | 单卡 | 1–4 倍，默认 4 倍 | 独立虚拟环境 |
 | RealBasicVSR | 非扩散的循环超分 | 视频 | 单卡 | 固定 4 倍 | 主虚拟环境 |
+| Real-ESRGAN | GAN 超分 | 图片 | 单卡 | 2 倍或 4 倍模型，成品 1–8 倍，默认跟随模型 | 主虚拟环境 |
+| SwinIR | Transformer 修复 | 图片 | 单卡 | 超分模型 2 倍或 4 倍（成品 1–8 倍）；去噪和去 JPEG 压缩模型不放大 | 主虚拟环境 |
+| SCUNet | 盲去噪 | 图片 | 单卡 | 不放大 | 主虚拟环境 |
+| GFPGAN | 人脸修复，背景可交给 Real-ESRGAN | 图片 | 单卡 | 1、2、4 倍，默认 2 倍 | 主虚拟环境 |
 
 - **SeedVR2**：默认使用 3B FP8 模型、VAE 分块、时间重叠 3 帧，按每张卡 12–16GB 显存配置。视频批大小按所选显卡中显存最小的一张自动选择：约 12GB 每批 5 帧，约 16GB 及以上每批 9 帧（批大小必须是 4n+1）。检测到两张及以上显卡时默认使用前两张，按帧分段，每张卡各加载一份模型。还可以切换 3B/7B、FP16/GGUF、Sharp 等模型，以及色彩校正、显存卸载、`torch.compile`、PNG 序列输出、10-bit MP4 等选项。
 - **FlashVSR**：默认 Tiny Long 模式，比 SeedVR2 更快、更省显存。安装时会尝试编译 Block-Sparse-Attention，编译失败时自动改用整块注意力，速度更慢。
 - **SwiftVR**：权重是研究许可，个人本地使用可以，商用需要作者书面授权。
 - **RealBasicVSR**：网络结构直接实现在本仓库里，不需要额外检出上游代码，速度通常更快，细节和人脸弱于扩散模型。
+- **图片引擎**（Real-ESRGAN、SwinIR、SCUNet、GFPGAN）：网络结构也直接实现在本仓库里，用主环境运行。每个引擎都有几个模型可选，例如 Real-ESRGAN 的照片、动漫和轻量通用模型，SwinIR 的超分、去噪和去 JPEG 压缩模型，GFPGAN 的 v1.4/v1.3。表单按所选模型切换参数和默认值：只有用得上的参数才显示（例如去噪强度只对轻量通用模型出现，GFPGAN 只修人脸时不显示背景分块设置），倍数等默认值跟着模型变。大图分块处理，显存不够时把分块大小调小。GFPGAN 的背景放大复用 Real-ESRGAN 的模型和权重。
 
 单卡引擎在选了多张卡时只用第一张。各引擎的完整参数、默认值和说明由 `GET /engines` 返回，桌面界面也按这份 schema 生成表单。使用前请看一下文末的[注意事项](#注意事项)。
 
@@ -64,8 +69,12 @@ FlashVSR 或 SwiftVR 没装好时，`videox setup` 会报出是哪个引擎失�
 | FlashVSR | `models\FlashVSR` | Hugging Face `JunhaoZhuang/FlashVSR-v1.1`：`diffusion_pytorch_model_streaming_dmd.safetensors`、`LQ_proj_in.ckpt`、`TCDecoder.ckpt`、`Wan2.1_VAE.pth` |
 | SwiftVR | `models\SwiftVR` | Hugging Face `H-oliday/SwiftVR`：`reae.safetensors`、`prompt_embedding.safetensors`、`transformer/config.json`、`transformer/diffusion_pytorch_model.safetensors` |
 | RealBasicVSR | `models\RealBasicVSR` | OpenMMLab（MMEditing）发布的 `realbasicvsr_c64b20_1x30x8_lr5e-5_150k_reds_20211104-52f77c2c.pth`，本地保存为 `RealBasicVSR_x4.pth` |
+| Real-ESRGAN | `models\RealESRGAN` | `xinntao/Real-ESRGAN` 的 GitHub Releases，按所选模型下载，默认是 `RealESRGAN_x4plus.pth` |
+| SwinIR | `models\SwinIR` | `JingyunLiang/SwinIR` 的 GitHub Releases（v0.0），按所选模型下载，默认是 `003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_GAN.pth` |
+| SCUNet | `models\SCUNet` | `cszn/KAIR` 的 GitHub Releases（v1.0）：`scunet_color_real_psnr.pth`、`scunet_color_real_gan.pth` |
+| GFPGAN | `models\GFPGAN` | `TencentARC/GFPGAN` 的 GitHub Releases：`GFPGANv1.4.pth` 或 `GFPGANv1.3.pth`；`xinntao/facexlib` 的人脸检测权重 `detection_Resnet50_Final.pth`。背景放大用 `models\RealESRGAN` 里的权重 |
 
-FlashVSR、SwiftVR 和 RealBasicVSR 的下载地址写在代码里，直接访问 huggingface.co 和 download.openmmlab.com。网络不通时可以手动下载，按上表的文件名和相对路径放进对应目录，已存在且非空的文件不会重新下载。
+FlashVSR、SwiftVR 和 RealBasicVSR 的下载地址写在代码里，直接访问 huggingface.co 和 download.openmmlab.com；图片引擎访问 github.com。图片引擎只下载所选模型需要的文件，换模型时再下载对应文件。网络不通时可以手动下载，按上表的文件名和相对路径放进对应目录，已存在且非空的文件不会重新下载。下载中断或收到的字节数和服务器声明的不一致时，任务失败且不留下半截文件，下次运行会重新下载。
 
 ## 命令行
 
@@ -76,8 +85,11 @@ FlashVSR、SwiftVR 和 RealBasicVSR 的下载地址写在代码里，直接访�
 # 换引擎
 .\.venv\Scripts\videox restore input.mp4 --engine flashvsr
 
-# 图片按扩展名自动识别，只有 SeedVR2 支持图片
+# 图片按扩展名自动识别
 .\.venv\Scripts\videox restore photo.jpg
+
+# 图片引擎和它的参数
+.\.venv\Scripts\videox restore photo.jpg --engine gfpgan --param upscale=4 --param strength=0.7
 ```
 
 `restore` 的参数：
@@ -85,14 +97,15 @@ FlashVSR、SwiftVR 和 RealBasicVSR 的下载地址写在代码里，直接访�
 | 参数 | 说明 |
 | --- | --- |
 | `-o, --output` | 输出路径，相对路径按当前目录解析。省略时写到项目根目录下的 `output\<原文件名去掉扩展名>.<引擎>.mp4`，例如 `input.mp4` 用 SeedVR2 处理后是 `output\input.seedvr2.mp4`；图片是 `.png` |
-| `--engine` | `seedvr2`（默认）、`flashvsr`、`swiftvr`、`realbasicvsr` |
-| `--devices` | CUDA 设备号，例如 `0,1`。省略时 SeedVR2 在有两张及以上显卡时用前两张，否则用第一张；其他三个是单卡引擎，只用列表里的第一张 |
+| `--engine` | `seedvr2`（默认）、`flashvsr`、`swiftvr`、`realbasicvsr`；图片还可以用 `realesrgan`、`swinir`、`scunet`、`gfpgan` |
+| `--devices` | CUDA 设备号，例如 `0,1`。省略时 SeedVR2 在有两张及以上显卡时用前两张，否则用第一张；其他引擎都是单卡引擎，只用列表里的第一张 |
 | `--resolution` | 输出短边分辨率，只对 SeedVR2 生效 |
 | `--batch-size` | 批大小（4n+1），只对 SeedVR2 生效 |
+| `--param 名称=值` | 任意引擎参数，可以重复。名称和取值范围见 `GET /engines` 返回的 `params_schema`，值按字段类型转换，布尔值写 `true`/`false` |
 
-其他引擎参数（包括 SeedVR2 的 `chunk_size`）目前只能通过 API 或桌面界面设置。
+例如 `--param model=real_x2_m --param tile=256`（SwinIR），或 `--param chunk_size=300`（SeedVR2）。
 
-视频的处理流程是：引擎先在输出位置旁写出一份无声视频（`<输出名>.video-only.mp4`）。原片有音轨时，把原片的第一条音轨拷回（拷贝失败会转成 192k AAC），时长取画面和音轨中较短的一方；没有音轨时直接封装成片。输出容器由扩展名决定，视频输出没写扩展名时补 `.mp4`。图片识别的扩展名是 png、jpg、jpeg、webp、bmp、tif、tiff，图片输出的扩展名不在其中时改成 `.png`。
+视频的处理流程是：引擎先在输出位置旁写出一份无声视频（`<输出名>.video-only.mp4`）。原片有音轨时，把原片的第一条音轨拷回（拷贝失败会转成 192k AAC），时长取画面和音轨中较短的一方；没有音轨时直接封装成片。输出容器由扩展名决定，视频输出没写扩展名时补 `.mp4`。图片识别的扩展名是 png、jpg、jpeg、webp、bmp、tif、tiff，图片输出的扩展名不在其中时改成 `.png`。图片引擎输出 PNG、WebP、TIFF 时保留透明通道，并带上原图的 ICC 色彩配置；WebP 每边最多 16383 像素，JPEG 最多 65500 像素，成品超出时在开始处理前就报错。
 
 其他子命令：
 
@@ -138,7 +151,7 @@ FlashVSR、SwiftVR 和 RealBasicVSR 的下载地址写在代码里，直接访�
 
 任务状态有 `queued`、`running`、`completed`、`failed`、`cancelled`。SSE 事件类型有 `queued`、`stage`、`log`、`progress`、`preview`、`completed`、`failed`、`cancelled`，每条事件的 `data` 是一个 JSON 对象。连接时会先重放这个任务已有的事件（最多最近 2000 条），空闲时每 15 秒发一条保活注释，任务结束后服务端关闭连接。
 
-`progress` 取值 0 到 1，但不一定单调增长。SeedVR2 把一轮编码、放大、解码、后处理按阶段折算成 0 到 1，设置了 `chunk_size` 分段处理时每一段都会从 0 重新计数；其他引擎报告的是当前阶段（`stage`，依次是 download、load、restore）内的比例，换阶段时会从 1 回到 0。
+`progress` 取值 0 到 1，但不一定单调增长。SeedVR2 把一轮编码、放大、解码、后处理按阶段折算成 0 到 1，设置了 `chunk_size` 分段处理时每一段都会从 0 重新计数；其他引擎报告的是当前阶段（`stage`，依次是 download、load、restore，GFPGAN 在 restore 前还有 face）内的比例，换阶段时会从 1 回到 0。
 
 任务记录只保存在服务进程的内存里，服务重启后就查不到了。服务不排队，每个任务提交后立即在后台启动，同时提交多个任务时要留意显存。预览图写在 `output\.previews\<任务 id>`。
 
@@ -156,10 +169,10 @@ npm run dev
 
 - **修复**：选择视频、输出位置、引擎和显卡，按所选引擎的参数 schema 生成分组表单。未改动的参数沿用服务端默认值。
 - **任务**：本次会话的视频任务列表，显示阶段、进度、日志，可以取消任务，还可以把原片和修复结果的同一帧并排放大对比。
-- **图片**：用 SeedVR2 处理单张图片，任务进度和对比显示在同一页。
+- **图片**：选择图片引擎和其中的模型处理单张图片，表单按所选模型切换参数和默认值，任务进度和对比显示在同一页。
 - **系统**：显示 `GET /system` 的内容，包括显卡、PyTorch、ffmpeg、各引擎的检出、虚拟环境和权重状态。
 
-对比用的预览帧由引擎写出：SeedVR2 在后处理阶段更新为最近完成的一帧，RealBasicVSR 每处理完一段更新一次，FlashVSR 和 SwiftVR 只在整段处理完后给出首帧。
+对比用的预览帧由引擎写出：SeedVR2 在后处理阶段更新为最近完成的一帧，RealBasicVSR 每处理完一段更新一次，FlashVSR 和 SwiftVR 只在整段处理完后给出首帧，图片引擎在整张处理完后给出结果。
 
 窗口刷新后，界面会从 `output\.session-jobs.json` 找回本次会话的任务（前提是服务进程还在）。桌面端关闭了 Electron 的硬件加速，避免窗口和修复任务争用同一张显卡导致界面卡死。
 
@@ -184,6 +197,7 @@ src/videox/
   jobs/             任务模型、内存任务存储、任务执行（子进程、进度、取消、音轨回封）
   engines/          引擎协议、注册表、参数 schema 工具、进度协议
     seedvr2/  flashvsr/  swiftvr/  realbasicvsr/
+    realesrgan/  swinir/  scunet/  gfpgan/   图片引擎，共用 image_engine.py 和 image_io.py
   media/            ffprobe/ffmpeg 调用、图片和视频的区分
   hardware/         通过 nvidia-smi 查询显卡，默认显卡和批大小
 desktop/            Electron + React + Tailwind 桌面界面
@@ -217,11 +231,12 @@ npm run typecheck
 在 `src/videox/engines/` 下新建一个包，实现 `engines/base.py` 里的 `RestorationEngine` 协议，再在 `engines/registry.py` 的 `default_registry()` 里注册。注册后，引擎会出现在 `GET /engines` 和桌面表单里。
 
 - `id` 属性：引擎的唯一标识，注册表按它索引。
-- `manifest()`：返回 id、名称、说明、能力（`capabilities`，必填，取值 `upscale`、`interpolate`、`face`）、支持的媒体（默认只有 `video`）、显卡策略（`multi` 或 `single`，默认 `multi`）和参数 schema。schema 顶层的 `groups` 决定分组的标题和顺序，每个字段可以带 `group`、`media`、`enum_labels`、`description`；桌面界面只为 string、integer、number、boolean 类型的字段生成表单。可以用 `engines/fields.py` 里的辅助函数构造。
+- `manifest()`：返回 id、名称、说明、能力（`capabilities`，必填，取值 `upscale`、`interpolate`、`face`、`denoise`）、支持的媒体（默认只有 `video`）、显卡策略（`multi` 或 `single`，默认 `multi`）和参数 schema。schema 顶层的 `groups` 决定分组的标题和顺序，每个字段可以带 `group`、`media`、`enum_labels`、`enum_descriptions`（每个选项一句说明，显示在下拉框下方）、`description`；桌面界面只为 string、integer、number、boolean 类型的字段生成表单。可以用 `engines/fields.py` 里的辅助函数构造。
+- 字段之间的联动：`visible_when` 让字段只在前面某个字段取指定值时显示和生效，`overrides` 在前面字段取指定值时替换默认值、范围或选项（用 `fields.conditional()` 构造）。条件只能引用排在前面的字段，服务端的 `resolve_params()` 和桌面界面按字段顺序用同一套规则解析，隐藏的字段不会发给引擎。
 - `build_command()`：把任务转换成一条子进程命令行，引擎在独立进程里运行。视频任务收到的 `output_path` 是中间文件 `<输出名>.video-only.mp4`，引擎只需要写出画面，音轨回封由任务执行器统一处理。
 - `parse_log_line()`：从引擎输出中解析阶段和进度，任务执行器只调用这个方法。要用通用协议，就在这里调用 `engines/progress.py` 的 `parse_engine_line()`。这样子进程每行打印 `{"videox_progress": {"phase": ..., "current": ..., "total": ...}}` 就能报告进度，打印 `{"videox_preview": {"frame": N}}`（N ≥ 1）就能通知新的预览帧。子进程里可以直接用 `emit_progress()`；预览可以用 `engines/preview_io.py` 的 `publish_pair()`：第一个参数传 `os.environ.get("VIDEOX_PREVIEW_DIR")`（任务执行器为每个任务设置的预览目录），它会把 `output.jpg`（必需）和 `source.jpg`（可选）写进这个目录，再发出预览事件。
 - `working_directory()`、`subprocess_env()`：子进程的工作目录和环境变量。
 - 可选 `model_directory(root)`：返回这个引擎的权重目录。不提供时，`ctx.model_dir` 指向 SeedVR2 的 `models\SEEDVR2`。
 - 可选 `resolve_python(ctx)`：返回子进程使用的 Python。不提供时用主虚拟环境的 Python。
 
-`setup_env.py` 的安装步骤和 `doctor.py` 的 `_engine_statuses()` 都是逐个引擎写的。新引擎如果要检出上游代码、用独立虚拟环境或检查权重，需要在这两处补上，否则 `videox setup` 不会准备它，`videox doctor` 和系统页也不会显示它。
+只处理图片、在主环境运行的引擎可以继承 `engines/image_engine.py` 的 `MainImageEngine`，再在 `doctor.py` 的 `_IMAGE_ENGINES` 里登记。其他引擎在 `setup_env.py` 的安装步骤和 `doctor.py` 的 `_engine_statuses()` 里都是逐个写的。新引擎如果要检出上游代码、用独立虚拟环境或检查权重，需要在这两处补上，否则 `videox setup` 不会准备它，`videox doctor` 和系统页也不会显示它。

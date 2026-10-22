@@ -1,38 +1,48 @@
+import http.server
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
 
-from videox.engines.downloads import download_file, missing_files
+from videox.engines.downloads import download_file
 from videox.errors import VideoXError
 
 
-class _Truncating(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:
+class _Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"x" * 4000
         self.send_response(200)
-        self.send_header("Content-Length", "1000")
+        # The full file announces 4000 bytes; the cut one closes after 1000.
+        self.send_header("Content-Length", "4000")
         self.end_headers()
-        # The server announces 1000 bytes, sends 300 and closes cleanly.
-        self.wfile.write(b"x" * 300)
+        self.wfile.write(body if self.path == "/full" else body[:1000])
 
-    def log_message(self, *args: object) -> None:
-        return
+    def log_message(self, *args):
+        pass
 
 
-def test_truncated_download_is_not_kept_as_the_weight_file(tmp_path: Path, monkeypatch):
-    for name in ("no_proxy", "NO_PROXY"):
-        monkeypatch.setenv(name, "*")
-    server = HTTPServer(("127.0.0.1", 0), _Truncating)
-    thread = threading.Thread(target=server.handle_request, daemon=True)
+@pytest.fixture
+def server():
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
-    dest = tmp_path / "model.safetensors"
-    try:
-        with pytest.raises(VideoXError, match="下载不完整"):
-            download_file(f"http://127.0.0.1:{server.server_port}/model", dest)
-    finally:
-        thread.join(5)
-        server.server_close()
-    assert not dest.exists()
-    assert not (tmp_path / "model.safetensors.part").exists()
-    assert missing_files(tmp_path, ("model.safetensors",)) == ["model.safetensors"]
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def test_download_keeps_a_complete_file(server, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    dest = tmp_path / "weights" / "model.pth"
+    download_file(f"{server}/full", dest)
+    assert dest.read_bytes() == b"x" * 4000
+    assert list(dest.parent.iterdir()) == [dest]
+
+
+def test_download_rejects_a_cut_off_file(server, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    dest = tmp_path / "model.pth"
+    with pytest.raises(VideoXError, match="下载"):
+        download_file(f"{server}/cut", dest)
+    # Nothing is left behind, so the next run downloads again.
+    assert list(tmp_path.iterdir()) == []

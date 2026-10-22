@@ -13,7 +13,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { cancelSessionJob } from '@/hooks/use-session-jobs'
 import { useMediaTaskForm } from '@/hooks/use-media-task-form'
 import { fileName, formatTime, isTerminal, statusLabel, statusVariant } from '@/lib/format'
-import { gpuHelp, outputHelp } from '@/lib/task-schema'
+import { engineHelp, gpuHelp, outputHelp } from '@/lib/task-schema'
 import type { EngineManifest, MediaKind, SessionJob, SystemReport } from '@/lib/types'
 import { cn } from 'cn'
 
@@ -118,6 +118,7 @@ export function MediaTaskPage({
             engine={form.engine}
             available={form.available}
             connected={connected}
+            help={engineHelp(media)}
             onChange={form.changeEngine}
           />
           {form.primaryFields.length > 0 ? (

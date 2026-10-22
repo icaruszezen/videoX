@@ -50,6 +50,7 @@ export interface EngineStatus {
   models_present: string[]
   models_missing: string[]
   detail: string
+  builtin?: boolean
 }
 
 export interface SystemReport {
@@ -71,18 +72,30 @@ export interface SystemReport {
   warnings: string[]
 }
 
+export type SchemaScalar = string | number | boolean
+
+/** Maps an earlier field to the values that make a rule apply. */
+export type SchemaCondition = Record<string, SchemaScalar[]>
+
+export interface SchemaOverride extends Omit<SchemaProperty, 'visible_when' | 'overrides'> {
+  when: SchemaCondition
+}
+
 export interface SchemaProperty {
   type?: string
   title?: string
-  default?: string | number | boolean
+  default?: SchemaScalar
   minimum?: number
   maximum?: number
   step?: number
   description?: string
   enum?: string[]
   enum_labels?: Record<string, string>
+  enum_descriptions?: Record<string, string>
   group?: string
   media?: MediaKind[]
+  visible_when?: SchemaCondition
+  overrides?: SchemaOverride[]
 }
 
 export interface SchemaGroup {
