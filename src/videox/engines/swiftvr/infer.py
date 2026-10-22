@@ -56,6 +56,7 @@ def run_swiftvr(request: SwiftRequest) -> None:
     out_w, out_h = resolution or (lq_w * request.upscale, lq_h * request.upscale)
     print(f"SwiftVR 将处理 {kept}/{raw_total} 帧，画面 {lq_w}x{lq_h}，输出 {out_w}x{out_h}", flush=True)
     _report_chunks(pipe, kept, request.clip_len)
+    _write_at_source_rate(request.input_path)
     request.output_path.parent.mkdir(parents=True, exist_ok=True)
     pipe.restore_video(
         str(request.input_path),
@@ -101,6 +102,37 @@ def _report_chunks(pipe, frames: int, clip_len: int) -> None:
 
     pipe.tae_stream.decode_chunk_fixed = counted
     emit_progress("restore", 0, total)
+
+
+def _write_at_source_rate(source: Path) -> None:
+    """Stamp the output with the source's exact rate (24000/1001, not imageio's 23.98)."""
+    from videox.media.ffmpeg import probe_media
+
+    try:
+        rate = probe_media(source).frame_rate
+    except VideoXError:
+        rate = None
+    if not rate:
+        return
+    import imageio
+    import swiftvr.runner as runner
+    from swiftvr.io import quality_to_crf
+
+    def open_writer(output_path, fps=8, video_format="", preset="", quality=85):
+        # Same as upstream's open_stream_video_writer, plus an input -r; ffmpeg keeps the last one.
+        extra = ["-preset", str(preset)] if preset else []
+        pixels = "yuv444p" if video_format == "yuv444p" else "yuv420p"
+        return imageio.get_writer(
+            output_path,
+            fps=fps,
+            codec="libx265",
+            pixelformat=pixels,
+            macro_block_size=None,
+            ffmpeg_params=["-crf", str(quality_to_crf(quality))] + extra,
+            input_params=["-r", rate],
+        )
+
+    runner.open_stream_video_writer = open_writer
 
 
 def _publish_ends(source: Path, output: Path) -> None:

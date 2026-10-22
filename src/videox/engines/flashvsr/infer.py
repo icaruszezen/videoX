@@ -11,6 +11,7 @@ from videox.engines.flashvsr.weights import ensure_weights
 from videox.engines.preview_io import publish_pair
 from videox.engines.progress import emit_progress
 from videox.errors import VideoXError
+from videox.media.frames import probe_video
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,8 @@ def run_flashvsr(request: FlashRequest) -> None:
             "请安装 CUDA Toolkit 后重新运行 videox setup。"
         )
     _patch_tqdm()
+    # Fail on an unreadable input before downloading and loading several GB of models.
+    probe_video(request.input_path)
     emit_progress("download", 0, 1)
     ensure_weights(request.model_dir, weights_for(request.mode))
     emit_progress("download", 1, 1)
@@ -195,69 +198,44 @@ class _Clip:
     padded_w: int
     padded_h: int
     fps: float
-    rate: str | None
+    rate: str
     source: object
 
 
 def _prepare_input(path: Path, scale: int) -> _Clip:
-    import imageio.v2 as imageio
     import numpy as np
     import torch
     from PIL import Image
 
-    rate, probed_fps = _probe_rate(path)
-    reader = imageio.get_reader(str(path))
+    from videox.media.frames import FrameReader
+
+    # ffmpeg, not imageio: imageio cannot open .m4v/.flv/.3gp/.ts by itself and
+    # VFR clips need the same constant rate the output is written at.
+    reader = FrameReader(path)
     try:
-        first = Image.fromarray(reader.get_data(0)).convert("RGB")
-        meta = {}
-        try:
-            meta = reader.get_meta_data()
-        except Exception:
-            meta = {}
-        fps_value = meta.get("fps")
-        fps = probed_fps or (float(fps_value) if isinstance(fps_value, (int, float)) and fps_value > 0 else 30.0)
-        total = _count_frames(reader, meta)
-        if total <= 0:
-            raise VideoXError(f"读不到视频帧: {path}")
-        width, height = first.size
-        scaled_w, scaled_h, padded_w, padded_h = _target_size(width, height, scale)
-        print(f"原片 {width}x{height}，{total} 帧，{fps:g} fps；输出 {scaled_w}x{scaled_h}", flush=True)
-        # The pipeline needs 8k+1 frames and drops the last 4; pad with the last
-        # frame instead of cutting the tail off, and trim the result later.
-        count = _smallest_8n1_at_least(max(total + 4, 25))
-        indexes = list(range(total)) + [total - 1] * (count - total)
-        video = torch.empty((1, 3, count, padded_h, padded_w), dtype=torch.bfloat16)
-        for slot, index in enumerate(indexes):
-            image = Image.fromarray(reader.get_data(index)).convert("RGB")
-            video[0, :, slot] = _to_tensor(_upscale_pad(image, scaled_w, scaled_h, padded_w, padded_h))
+        frames: list[bytes] = []
+        while batch := reader.read_many(64):
+            frames.extend(batch)
+        reader.finish()
     finally:
         reader.close()
-    source = np.asarray(first, dtype=np.uint8)
-    return _Clip(video, total, count, scaled_w, scaled_h, padded_w, padded_h, fps, rate, source)
-
-
-def _probe_rate(path: Path) -> tuple[str | None, float | None]:
-    """The exact frame rate ("30000/1001"), so 29.97 fps does not become 30."""
-    try:
-        from videox.media.ffmpeg import probe_media
-
-        info = probe_media(path)
-    except Exception:
-        return None, None
-    return info.frame_rate, info.fps
-
-
-def _count_frames(reader, meta: dict) -> int:
-    count = meta.get("nframes")
-    if isinstance(count, int) and count > 0:
-        return count
-    try:
-        counted = reader.count_frames()
-        if isinstance(counted, int) and counted > 0:
-            return counted
-    except Exception:
-        return 0
-    return 0
+    total = len(frames)
+    if total <= 0:
+        raise VideoXError(f"读不到视频帧: {path}")
+    width, height = reader.width, reader.height
+    scaled_w, scaled_h, padded_w, padded_h = _target_size(width, height, scale)
+    print(f"原片 {width}x{height}，{total} 帧，{reader.fps:g} fps；输出 {scaled_w}x{scaled_h}", flush=True)
+    source = np.frombuffer(frames[0], dtype=np.uint8).reshape(height, width, 3).copy()
+    # The pipeline needs 8k+1 frames and drops the last 4; pad with the last
+    # frame instead of cutting the tail off, and trim the result later.
+    count = _smallest_8n1_at_least(max(total + 4, 25))
+    video = torch.empty((1, 3, count, padded_h, padded_w), dtype=torch.bfloat16)
+    for slot in range(total):
+        image = Image.frombytes("RGB", (width, height), frames[slot])
+        frames[slot] = b""
+        video[0, :, slot] = _to_tensor(_upscale_pad(image, scaled_w, scaled_h, padded_w, padded_h))
+    video[0, :, total:] = video[0, :, total - 1 : total]
+    return _Clip(video, total, count, scaled_w, scaled_h, padded_w, padded_h, reader.fps, reader.rate, source)
 
 
 def _smallest_8n1_at_least(count: int) -> int:
