@@ -106,6 +106,8 @@ export interface EngineManifest {
 export interface SessionJob {
   record: JobRecord
   logs: string[]
+  // Number of older log lines dropped from the front of `logs`.
+  logOffset?: number
   message: string
   previewFrame?: number | null
 }

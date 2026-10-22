@@ -14,7 +14,10 @@ export const EVENT_TYPES = [
 const STAGE_LABELS: Record<string, string> = {
   queued: '排队',
   prepare: '读取视频',
+  download: '下载权重',
+  load: '加载模型',
   restore: '修复',
+  face: '人脸修复',
   encoding: '编码',
   upscaling: '放大',
   decoding: '解码',
@@ -47,9 +50,17 @@ export function paramLabel(key: string, title?: string): string {
   return PARAM_LABELS[key] ?? key
 }
 
-export function stageLabel(stage: string | null | undefined): string {
+export function stageLabel(stage: string | null | undefined, media?: MediaKind): string {
   if (!stage) return '等待中'
+  if (stage === 'prepare' && media === 'image') return '读取图片'
   return STAGE_LABELS[stage] ?? stage
+}
+
+// Engines print one JSON object per line to report progress and preview frames.
+// The same numbers reach the UI as stage/progress/preview events, so the raw lines
+// are only noise in the log and the status line.
+export function isProtocolLine(text: string): boolean {
+  return /^\s*\{\s*"videox_(progress|preview)"/.test(text)
 }
 
 export function statusLabel(status: JobStatus): string {
@@ -124,6 +135,21 @@ export function formatTime(iso: string): string {
   return date.toLocaleString('zh-CN', { hour12: false })
 }
 
+export function formatClock(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  const today = new Date().toDateString() === date.toDateString()
+  return today
+    ? date.toLocaleTimeString('zh-CN', { hour12: false })
+    : date.toLocaleString('zh-CN', {
+        hour12: false,
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      })
+}
+
 export function formatMemory(mib: number): string {
   if (mib >= 1024) return `${(mib / 1024).toFixed(1)} GB`
   return `${mib} MiB`
@@ -149,7 +175,15 @@ export function isTerminal(status: JobStatus): boolean {
   return status === 'completed' || status === 'failed' || status === 'cancelled'
 }
 
-export function applyProgress(job: SessionJob, event: ProgressEvent, logs: string[]): SessionJob {
+export function applyProgress(job: SessionJob, event: ProgressEvent): SessionJob {
+  const previewFrame =
+    event.type === 'preview' && event.preview_frame != null
+      ? event.preview_frame
+      : (job.previewFrame ?? null)
+  const terminalEvent =
+    event.type === 'completed' || event.type === 'failed' || event.type === 'cancelled'
+  // A replayed event stream must not move a finished job back to queued or running.
+  if (isTerminal(job.record.status) && !terminalEvent) return { ...job, previewFrame }
   const record = { ...job.record }
   if (event.stage) record.stage = event.stage
   if (event.progress != null) record.progress = event.progress
@@ -157,6 +191,7 @@ export function applyProgress(job: SessionJob, event: ProgressEvent, logs: strin
   if (event.type === 'completed') {
     record.status = 'completed'
     record.progress = event.progress ?? 1
+    record.stage = 'done'
     record.error = null
   }
   if (event.type === 'failed') {
@@ -176,12 +211,13 @@ export function applyProgress(job: SessionJob, event: ProgressEvent, logs: strin
   ) {
     record.status = 'running'
   }
-  const message = event.type === 'log' ? job.message : event.message || job.message
-  const previewFrame =
-    event.type === 'preview' && event.preview_frame != null
-      ? event.preview_frame
-      : (job.previewFrame ?? null)
-  return { record, logs, message, previewFrame }
+  // Protocol lines are never shown. The runner's own '正在读取…' only describes
+  // the prepare step, so drop it once the job moves on, in case the engine
+  // reports nothing readable after that.
+  const kept = job.record.stage === 'prepare' && record.stage !== 'prepare' ? '' : job.message
+  const message =
+    event.type === 'log' || isProtocolLine(event.message) ? kept : event.message || kept
+  return { ...job, record, message, previewFrame }
 }
 
 export function isSimpleProperty(property: SchemaProperty): boolean {

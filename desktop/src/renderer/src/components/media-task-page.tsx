@@ -3,25 +3,19 @@ import { toast } from 'sonner'
 
 import { FrameCompare } from '@/components/frame-compare'
 import { JobLog } from '@/components/job-log'
+import { JobSummary } from '@/components/job-summary'
 import { EngineSelect, GpuPicker, PathField, SchemaField } from '@/components/param-fields'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
-import { Progress } from '@/components/ui/progress'
 import { cancelSessionJob } from '@/hooks/use-session-jobs'
 import { useMediaTaskForm } from '@/hooks/use-media-task-form'
-import {
-  fileName,
-  formatTime,
-  isTerminal,
-  stageLabel,
-  statusLabel,
-  statusVariant
-} from '@/lib/format'
+import { fileName, formatTime, isTerminal, statusLabel, statusVariant } from '@/lib/format'
 import { gpuHelp, outputHelp } from '@/lib/task-schema'
 import type { EngineManifest, MediaKind, SessionJob, SystemReport } from '@/lib/types'
+import { cn } from 'cn'
 
 interface MediaTaskPageProps {
   media: MediaKind
@@ -58,7 +52,6 @@ export function MediaTaskPage({
   })
   const pageJobs = jobs.filter((job) => (job.record.spec.media ?? 'video') === media)
   const selected = pageJobs.find((job) => job.record.id === selectedId) ?? null
-  const progressValue = Math.round((selected?.record.progress ?? 0) * 100)
   const pngSequence = media === 'video' && form.outputFormat === 'png'
 
   async function cancelSelected(): Promise<void> {
@@ -190,34 +183,17 @@ export function MediaTaskPage({
               <p className="py-8 text-center text-sm text-muted-foreground">还没有任务</p>
             ) : (
               <>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant={statusVariant(selected.record.status)}>
-                    {statusLabel(selected.record.status)}
-                  </Badge>
-                  <span className="text-sm text-muted-foreground">
-                    {stageLabel(selected.record.stage)}
-                  </span>
-                  <span className="ml-auto font-mono text-xs text-muted-foreground">
-                    {selected.record.id}
-                  </span>
-                </div>
-                <div className="flex items-center gap-3">
-                  <Progress value={progressValue} />
-                  <span className="w-10 text-right text-xs text-muted-foreground">
-                    {progressValue}%
-                  </span>
-                </div>
-                {selected.message ? <p className="text-sm">{selected.message}</p> : null}
+                <JobSummary job={selected} />
                 {selected.previewFrame != null || !isTerminal(selected.record.status) ? (
                   <FrameCompare jobId={selected.record.id} frame={selected.previewFrame ?? null} />
                 ) : null}
-                {selected.record.error ? (
-                  <Alert variant="destructive">
-                    <AlertTitle>失败</AlertTitle>
-                    <AlertDescription>{selected.record.error}</AlertDescription>
-                  </Alert>
-                ) : null}
-                <JobLog lines={selected.logs} className="h-64" />
+                <JobLog
+                  key={selected.record.id}
+                  lines={selected.logs}
+                  offset={selected.logOffset}
+                  finished={isTerminal(selected.record.status)}
+                  className="h-64"
+                />
                 <div className="flex justify-end">
                   <Button
                     variant="outline"
@@ -241,13 +217,21 @@ export function MediaTaskPage({
                 <button
                   key={job.record.id}
                   type="button"
-                  className="flex items-center gap-3 rounded-lg border px-3 py-2 text-left hover:bg-muted/50"
+                  aria-current={job.record.id === selected?.record.id ? 'true' : undefined}
+                  className={cn(
+                    'flex items-center gap-3 rounded-lg border px-3 py-2 text-left outline-none hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50',
+                    job.record.id === selected?.record.id &&
+                      'border-primary/70 bg-muted/60 hover:bg-muted/60'
+                  )}
                   onClick={() => onSelectJob(job.record.id)}
                 >
                   <Badge variant={statusVariant(job.record.status)}>
                     {statusLabel(job.record.status)}
                   </Badge>
-                  <span className="min-w-0 flex-1 truncate text-sm">
+                  <span
+                    className="min-w-0 flex-1 truncate text-sm"
+                    title={job.record.spec.input_path}
+                  >
                     {fileName(job.record.spec.input_path)}
                   </span>
                   <span className="shrink-0 text-xs text-muted-foreground">
