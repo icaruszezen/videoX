@@ -4,6 +4,14 @@ import json
 
 from videox.engines.base import LogInsight
 
+# Each phase owns a slice of the bar, so the bar does not fill up while the
+# weights download and then drop back to zero for the restore itself.
+_PHASE_RANGES = {
+    "download": (0.0, 0.05),
+    "load": (0.05, 0.05),
+    "restore": (0.10, 0.90),
+}
+
 
 def emit_progress(phase: str, current: float, total: float) -> None:
     print(
@@ -49,5 +57,8 @@ def parse_engine_line(line: str) -> LogInsight | None:
         total = float(progress.get("total") or 0)
     except (TypeError, ValueError):
         return LogInsight(stage=phase)
-    ratio = current / total if total > 0 else None
+    ratio = None
+    if total > 0:
+        base, span = _PHASE_RANGES.get(phase, (0.0, 1.0))
+        ratio = base + span * min(current / total, 1.0)
     return LogInsight(stage=phase, progress=ratio)

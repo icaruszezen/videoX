@@ -16,6 +16,7 @@ def download_file(url: str, dest: Path) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "videox"})
     print(f"正在下载 {dest.name}", flush=True)
     got = 0
+    total = 0
     try:
         with urllib.request.urlopen(request, timeout=300) as response:
             total = int(response.headers.get("Content-Length") or 0)
@@ -36,6 +37,10 @@ def download_file(url: str, dest: Path) -> None:
     if got <= 0:
         partial.unlink(missing_ok=True)
         raise VideoXError(f"下载结果是空的: {dest.name}")
+    if total and got != total:
+        # A connection closed early still ends the read loop normally.
+        partial.unlink(missing_ok=True)
+        raise VideoXError(f"下载不完整 {dest.name}: 收到 {got}/{total} 字节，请重试")
     partial.replace(dest)
 
 
