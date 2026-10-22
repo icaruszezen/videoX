@@ -118,7 +118,7 @@ _IMAGE_ENGINES = (
 )
 # Import name and pip package of what the image engines load besides torch.
 _IMAGE_PACKAGES = (("numpy", "numpy"), ("PIL", "Pillow"))
-_FACE_PACKAGES = (("cv2", "opencv-python"),)
+_FACE_PACKAGES = (("cv2", "opencv-python"), ("torchvision", "torchvision"))
 
 
 def _missing_packages(packages: tuple[tuple[str, str], ...]) -> list[str]:
