@@ -7,6 +7,7 @@ import {
   collectParams,
   schemaGroups,
   selectedOutputFormat,
+  valuesAfterChange,
   visibleFields,
   type FieldGroup
 } from '@/lib/task-schema'
@@ -78,7 +79,7 @@ export function useMediaTaskForm({
 
   const available = engines.filter((item) => (item.media ?? ['video']).includes(media))
   const engine = available.find((item) => item.id === engineId) ?? available[0]
-  const fields = visibleFields(engine, media)
+  const fields = visibleFields(engine, media, values)
   const primaryFields = fields.filter(([, property]) => (property.group ?? 'primary') === 'primary')
   const advancedGroups = schemaGroups(engine, fields, ['primary'])
   const parameterGroups = schemaGroups(engine, fields)
@@ -104,7 +105,9 @@ export function useMediaTaskForm({
   }
 
   function setField(key: string, value: string | boolean): void {
-    setValues((current) => ({ ...current, [key]: value }))
+    // Fields whose defaults follow this one (usually the model choice) move to
+    // the new default unless the user picked a value that still fits.
+    setValues((current) => valuesAfterChange(engine, media, current, key, value))
   }
 
   function changeEngine(value: string): void {

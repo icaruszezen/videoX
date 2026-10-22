@@ -52,7 +52,14 @@ def run(argv: list[str] | None = None) -> int:
     restore_parser.add_argument(
         "--engine",
         default="seedvr2",
-        help="引擎：seedvr2、flashvsr、swiftvr、realbasicvsr",
+        help="引擎：seedvr2、flashvsr、swiftvr、realbasicvsr；图片还可以用 realesrgan、swinir、scunet、gfpgan",
+    )
+    restore_parser.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        metavar="名称=值",
+        help="引擎参数，可以重复，例如 --param model=real_x2_m --param tile=256；名称见桌面端或 /engines",
     )
 
     serve_parser = sub.add_parser("serve", help="启动给以后界面使用的本地 API")
@@ -88,6 +95,7 @@ def _restore(args: argparse.Namespace) -> int:
         else default_restore_output(root, source, args.engine, media)
     )
     params = restore_params(args.engine, args.resolution, args.batch_size)
+    params.update(engine_params(args.engine, args.param))
     spec = JobSpec(
         engine_id=args.engine,
         input_path=str(source),
@@ -118,6 +126,34 @@ def restore_params(engine_id: str, resolution: int | None, batch_size: int | Non
         params["resolution"] = resolution
     if batch_size is not None:
         params["batch_size"] = batch_size
+    return params
+
+
+def engine_params(engine_id: str, items: list[str]) -> dict[str, object]:
+    """Turn repeated ``--param name=value`` into values typed by the engine's schema."""
+    if not items:
+        return {}
+    properties = default_registry().get(engine_id).manifest().params_schema.get("properties", {})
+    params: dict[str, object] = {}
+    for item in items:
+        key, separator, text = item.partition("=")
+        key = key.strip()
+        if not separator or key not in properties:
+            raise VideoXError(f"{engine_id} 没有参数 {key or item}")
+        kind = properties[key].get("type")
+        try:
+            if kind == "integer":
+                params[key] = int(text)
+            elif kind == "number":
+                params[key] = float(text)
+            elif kind == "boolean":
+                if text.lower() not in {"true", "false", "1", "0"}:
+                    raise ValueError(text)
+                params[key] = text.lower() in {"true", "1"}
+            else:
+                params[key] = text
+        except ValueError:
+            raise VideoXError(f"参数 {key} 的值无法识别: {text}") from None
     return params
 
 

@@ -24,13 +24,21 @@ class EngineRegistry:
 
 def default_registry() -> EngineRegistry:
     from videox.engines.flashvsr.engine import FlashVSREngine
+    from videox.engines.gfpgan.engine import GFPGANEngine
     from videox.engines.realbasicvsr.engine import RealBasicVSREngine
+    from videox.engines.realesrgan.engine import RealESRGANEngine
+    from videox.engines.scunet.engine import SCUNetEngine
     from videox.engines.seedvr2.engine import SeedVR2Engine
     from videox.engines.swiftvr.engine import SwiftVREngine
+    from videox.engines.swinir.engine import SwinIREngine
 
     registry = EngineRegistry()
     registry.register(SeedVR2Engine())
     registry.register(FlashVSREngine())
     registry.register(SwiftVREngine())
     registry.register(RealBasicVSREngine())
+    registry.register(RealESRGANEngine())
+    registry.register(SwinIREngine())
+    registry.register(SCUNetEngine())
+    registry.register(GFPGANEngine())
     return registry
