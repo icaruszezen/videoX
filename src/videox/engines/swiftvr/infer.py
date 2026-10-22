@@ -21,6 +21,7 @@ class SwiftRequest:
     upscale: int
     clip_len: int
     dtype: str
+    short_side: int = 0
 
 
 def run_swiftvr(request: SwiftRequest) -> None:
@@ -28,7 +29,6 @@ def run_swiftvr(request: SwiftRequest) -> None:
         raise VideoXError(f"分块长度必须是 4 的倍数，当前是 {request.clip_len}")
     if not request.input_path.is_file():
         raise VideoXError(f"输入文件不存在: {request.input_path}")
-    _patch_tqdm()
     emit_progress("download", 0, 1)
     ensure_weights(request.checkpoint)
     emit_progress("download", 1, 1)
@@ -37,8 +37,9 @@ def run_swiftvr(request: SwiftRequest) -> None:
     from swiftvr import SwiftVRPipeline
 
     dtype = request.dtype
-    if dtype == "bfloat16" and not torch.cuda.is_bf16_supported():
-        print("这张显卡不支持 bfloat16，改用 float16。", flush=True)
+    # is_bf16_supported() also counts emulation, which pre-Ampere cards run very slowly.
+    if dtype == "bfloat16" and torch.cuda.get_device_capability()[0] < 8:
+        print("这张显卡不支持原生 bfloat16，改用 float16。", flush=True)
         dtype = "float16"
     pipe = SwiftVRPipeline.from_pretrained(str(request.checkpoint)).to(
         "cuda",
@@ -47,43 +48,62 @@ def run_swiftvr(request: SwiftRequest) -> None:
         torch_compile=False,
     )
     emit_progress("load", 1, 1)
-    emit_progress("restore", 0, 1)
+    from swiftvr.io import get_video_info
+
+    raw_total, lq_h, lq_w, _fps = get_video_info(str(request.input_path))
+    kept = 4 * ((raw_total - 1) // 4) + 1
+    resolution = _output_size(lq_w, lq_h, request.short_side)
+    out_w, out_h = resolution or (lq_w * request.upscale, lq_h * request.upscale)
+    print(f"SwiftVR 将处理 {kept}/{raw_total} 帧，画面 {lq_w}x{lq_h}，输出 {out_w}x{out_h}", flush=True)
+    _report_chunks(pipe, kept, request.clip_len)
     request.output_path.parent.mkdir(parents=True, exist_ok=True)
-    stats = pipe.restore_video(
+    pipe.restore_video(
         str(request.input_path),
         str(request.output_path),
+        resolution=resolution,
         upscale=request.upscale,
         clip_len=request.clip_len,
         dit_overlap=0,
-        quality=90,
+        # Upstream's CLI default (x265 CRF about 20); 90 wrote near-lossless, very large files.
+        quality=60,
         png_save=False,
         queue_size=3,
         verbose=True,
     )
     if not request.output_path.is_file():
         raise VideoXError(f"引擎没有写出视频: {request.output_path}")
-    frames = int(stats.get("frames") or 1) if isinstance(stats, dict) else 1
-    _publish_ends(request.input_path, request.output_path, max(frames, 1))
+    _publish_ends(request.input_path, request.output_path)
     emit_progress("restore", 1, 1)
 
 
-def _patch_tqdm() -> None:
-    import tqdm as tqdm_module
-
-    original = tqdm_module.tqdm
-
-    class ReportingTqdm(original):
-        def update(self, n=1):
-            result = super().update(n)
-            total = self.total or 0
-            if total:
-                emit_progress("restore", float(self.n or 0), float(total))
-            return result
-
-    tqdm_module.tqdm = ReportingTqdm
+def _output_size(lq_w: int, lq_h: int, short_side: int) -> tuple[int, int] | None:
+    """(width, height) with the given short side and the source aspect, rounded to even."""
+    if short_side <= 0:
+        return None
+    if lq_w >= lq_h:
+        return max(2, round(lq_w * short_side / lq_h / 2) * 2), short_side
+    return short_side, max(2, round(lq_h * short_side / lq_w / 2) * 2)
 
 
-def _publish_ends(source: Path, output: Path, frame: int) -> None:
+def _report_chunks(pipe, frames: int, clip_len: int) -> None:
+    """Upstream prints no progress; count the chunks it decodes, one call per chunk."""
+    from swiftvr.streaming.chunk import build_chunk_specs
+
+    total = max(1, len(build_chunk_specs(frames, clip_len)))
+    decode = pipe.tae_stream.decode_chunk_fixed
+    done = [0]
+
+    def counted(z, spec):
+        out = decode(z, spec)
+        done[0] += 1
+        emit_progress("restore", min(done[0], total), total)
+        return out
+
+    pipe.tae_stream.decode_chunk_fixed = counted
+    emit_progress("restore", 0, total)
+
+
+def _publish_ends(source: Path, output: Path) -> None:
     directory = os.environ.get("VIDEOX_PREVIEW_DIR")
     ffmpeg = tool_executable("ffmpeg")
     if not directory or ffmpeg is None:
@@ -92,7 +112,8 @@ def _publish_ends(source: Path, output: Path, frame: int) -> None:
     root.mkdir(parents=True, exist_ok=True)
     _grab(ffmpeg, source, root / "source.jpg")
     if _grab(ffmpeg, output, root / "output.jpg"):
-        emit_preview(frame)
+        # Both pictures are the first frame.
+        emit_preview(1)
 
 
 def _grab(ffmpeg: str, video: Path, jpeg: Path) -> bool:

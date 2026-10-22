@@ -64,6 +64,21 @@ def venv_python(engine_dir: Path) -> Path:
     return engine_dir / ".venv" / "bin" / "python"
 
 
+def deps_marker(engine_dir: Path) -> Path:
+    """Written by setup: "ready" when the engine's imports worked, otherwise "missing"."""
+    return engine_dir / ".videox-deps"
+
+
+def engine_venv_ready(engine_dir: Path) -> bool:
+    if not venv_python(engine_dir).is_file():
+        return False
+    try:
+        return deps_marker(engine_dir).read_text(encoding="utf-8").strip() != "missing"
+    except OSError:
+        # Installed before setup checked the imports.
+        return True
+
+
 def read_rev_file(path: Path) -> str:
     if not path.is_file():
         raise FileNotFoundError(path)

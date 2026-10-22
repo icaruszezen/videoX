@@ -19,7 +19,7 @@ class RealBasicVSREngine:
         return EngineManifest(
             id=self.id,
             name="RealBasicVSR",
-            description="非扩散的循环超分，固定 4 倍。长视频按帧分段，速度通常更快，细节和人脸弱于扩散模型。只使用一张显卡。",
+            description="非扩散的循环超分，固定 4 倍，适合 720p 及以下的低清素材（1080p 原片会输出 8K，16GB 显卡放不下）。长视频按帧分段，速度通常更快，细节和人脸弱于扩散模型。只使用一张显卡。",
             capabilities=["upscale"],
             media=["video"],
             device_policy="single",

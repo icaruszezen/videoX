@@ -6,8 +6,8 @@ from videox.engines.downloads import download_file, missing_files, present_files
 from videox.engines.flashvsr.presets import WEIGHT_FILES, WEIGHT_REPO
 
 
-def ensure_weights(directory: Path) -> None:
-    for name in missing_files(directory, WEIGHT_FILES):
+def ensure_weights(directory: Path, names: tuple[str, ...] = WEIGHT_FILES) -> None:
+    for name in missing_files(directory, names):
         download_file(WEIGHT_REPO + name, directory / name)
 
 

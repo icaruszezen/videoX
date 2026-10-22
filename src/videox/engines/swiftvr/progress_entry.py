@@ -16,6 +16,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--clip-len", type=int, default=24)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--short-side", type=int, default=0)
     args = parser.parse_args(argv)
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
     from videox.engines.swiftvr.infer import SwiftRequest, run_swiftvr
@@ -28,6 +29,7 @@ def main(argv: list[str] | None = None) -> int:
             upscale=args.upscale,
             clip_len=args.clip_len,
             dtype=args.dtype,
+            short_side=args.short_side,
         )
     )
     return 0

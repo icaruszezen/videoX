@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,9 +51,18 @@ def run_realbasicvsr(request: RealBasicRequest) -> None:
             batch = reader.read_many(request.max_seq_len)
             if not batch:
                 break
-            output = _enhance(model, batch, reader.width, reader.height)
+            try:
+                output = _enhance(model, batch, reader.width, reader.height)
+            except torch.cuda.OutOfMemoryError as exc:
+                raise VideoXError(
+                    f"显存不足：{reader.width}x{reader.height} 的原片会输出 {reader.width * 4}x{reader.height * 4}。"
+                    "显存主要随原片分辨率增长，1080p 原片在 16GB 及以下的显卡上即使一次 1 帧也放不下；"
+                    "请先把原片缩到 720p 或更低，或调小一次处理帧数。"
+                ) from exc
             if writer is None:
-                writer = _FrameWriter(request.output_path, output.shape[2], output.shape[1], reader.fps)
+                writer = _FrameWriter(
+                    request.output_path, output.shape[2], output.shape[1], reader.rate, sar=reader.sar
+                )
             for frame in output:
                 writer.write(np.ascontiguousarray(frame).tobytes())
             done += len(batch)
@@ -71,6 +81,7 @@ def run_realbasicvsr(request: RealBasicRequest) -> None:
                 reader.width,
                 reader.height,
             )
+        reader.finish()
     finally:
         reader.close()
         if writer is not None:
@@ -92,22 +103,27 @@ def _enhance(model, frames: list[bytes], width: int, height: int):
 
 
 def _pad(video: torch.Tensor) -> tuple[torch.Tensor, int, int]:
-    _batch, _time, _channels, height, width = video.shape
-    pad_h = (4 - height % 4) % 4
-    pad_w = (4 - width % 4) % 4
-    if height + pad_h < 64:
-        pad_h += 64 - (height + pad_h)
-    if width + pad_w < 64:
-        pad_w += 64 - (width + pad_w)
+    """Only tiny frames need padding (SPyNet wants 64 px); repeat the edge, not black."""
+    batch, time, channels, height, width = video.shape
+    pad_h = max(0, 64 - height)
+    pad_w = max(0, 64 - width)
     if pad_h or pad_w:
-        video = F.pad(video, (0, pad_w, 0, pad_h))
+        # Replicate padding needs a 4D tensor.
+        flat = video.reshape(batch * time, channels, height, width)
+        flat = F.pad(flat, (0, pad_w, 0, pad_h), mode="replicate")
+        video = flat.reshape(batch, time, channels, height + pad_h, width + pad_w)
     return video, height, width
 
 
 class _FrameReader:
     def __init__(self, path: Path) -> None:
-        self.width, self.height, self.fps, self.frame_count = _probe(path)
+        probe = _probe(path)
+        self.width, self.height = probe.width, probe.height
+        self.fps, self.rate, self.sar = probe.fps, probe.rate, probe.sar
+        self.frame_count = probe.frame_count
         self._frame_bytes = self.width * self.height * 3
+        # A file, not a pipe: a long run of decode warnings cannot block ffmpeg.
+        self._stderr = tempfile.TemporaryFile()
         self._process = subprocess.Popen(
             [
                 ffmpeg_executable(),
@@ -115,6 +131,12 @@ class _FrameReader:
                 "error",
                 "-i",
                 str(path),
+                "-map",
+                "0:v:0",
+                # Decode at the same constant rate the writer stamps, so variable
+                # frame rate phone clips do not come out longer than the source.
+                "-r",
+                self.rate,
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
@@ -122,7 +144,7 @@ class _FrameReader:
                 "-",
             ],
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=self._stderr,
         )
 
     def read_many(self, count: int) -> list[bytes]:
@@ -135,15 +157,35 @@ class _FrameReader:
             frames.append(blob)
         return frames
 
+    def finish(self) -> None:
+        """After the last frame: report a decode failure instead of a short video."""
+        code = self._process.wait()
+        if code == 0:
+            return
+        self._stderr.seek(0)
+        lines = self._stderr.read().decode("utf-8", "replace").strip().splitlines()
+        tail = "\n".join(lines[-20:])
+        raise VideoXError(f"读取视频失败 (ffmpeg {code}): {tail}")
+
     def close(self) -> None:
+        # Never raises: closing early makes ffmpeg exit non-zero on purpose.
         if self._process.stdout is not None:
             self._process.stdout.close()
         self._process.wait()
+        self._stderr.close()
 
 
 class _FrameWriter:
-    def __init__(self, path: Path, width: int, height: int, fps: float) -> None:
+    def __init__(self, path: Path, width: int, height: int, rate: str, *, sar: str | None = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        # The output is always HD-sized, which players decode as BT.709; convert
+        # with that matrix and say so, instead of swscale's untagged BT.601.
+        filters = (
+            "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,"
+            "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv"
+        )
+        if sar:
+            filters += f",setsar={sar}"
         self._process = subprocess.Popen(
             [
                 ffmpeg_executable(),
@@ -157,18 +199,18 @@ class _FrameWriter:
                 "-s",
                 f"{width}x{height}",
                 "-r",
-                f"{fps:.6f}",
+                rate,
                 "-i",
                 "-",
                 "-an",
+                "-vf",
+                filters,
                 "-c:v",
                 "libx264",
                 "-preset",
                 "fast",
                 "-crf",
                 "16",
-                "-pix_fmt",
-                "yuv420p",
                 str(path),
             ],
             stdin=subprocess.PIPE,
@@ -189,7 +231,17 @@ class _FrameWriter:
             raise VideoXError(f"写出视频失败: {error.strip()}")
 
 
-def _probe(path: Path) -> tuple[int, int, float, int]:
+@dataclass(frozen=True)
+class _Probe:
+    width: int
+    height: int
+    fps: float
+    rate: str
+    sar: str | None
+    frame_count: int
+
+
+def _probe(path: Path) -> _Probe:
     completed = subprocess.run(
         [
             ffprobe_executable(),
@@ -224,24 +276,63 @@ def _probe(path: Path) -> tuple[int, int, float, int]:
         height = int(video["height"])
     except (KeyError, TypeError, ValueError) as exc:
         raise VideoXError(f"读不到视频分辨率: {path}") from exc
-    fps = _parse_rate(video.get("avg_frame_rate") or video.get("r_frame_rate") or "25/1")
+    if _quarter_turn(video):
+        # ffmpeg rotates portrait phone video while decoding, so the frames
+        # arrive with width and height swapped.
+        width, height = height, width
+    rate = _choose_rate(video)
+    fps = _parse_rate(rate)
     frames = _frame_count(video, payload.get("format") or {}, fps)
-    return width, height, fps, frames
+    return _Probe(width, height, fps, rate, _sample_aspect(video), frames)
 
 
-def _parse_rate(value: object) -> float:
+def _quarter_turn(stream: dict) -> bool:
+    values = [item.get("rotation") for item in stream.get("side_data_list") or [] if isinstance(item, dict)]
+    values.append((stream.get("tags") or {}).get("rotate"))  # ffprobe before 5.0
+    for value in values:
+        try:
+            return round(abs(float(value))) % 180 == 90
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _choose_rate(stream: dict) -> str:
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        text = str(stream.get(key) or "")
+        if _parse_rate(text, 0.0) > 0:
+            return text
+    return "25/1"
+
+
+def _sample_aspect(stream: dict) -> str | None:
+    """Non-square pixels (DVD and broadcast rips) as "num/den", else None."""
+    text = str(stream.get("sample_aspect_ratio") or "")
+    numerator, _, denominator = text.partition(":")
+    try:
+        num, den = int(numerator), int(denominator)
+    except ValueError:
+        return None
+    if num <= 0 or den <= 0 or num == den:
+        return None
+    return f"{num}/{den}"
+
+
+def _parse_rate(value: object, fallback: float = 25.0) -> float:
     text = str(value)
     if "/" in text:
         numerator, denominator = text.split("/", 1)
         try:
             den = float(denominator)
-            return float(numerator) / den if den else 25.0
+            rate = float(numerator) / den if den else fallback
         except ValueError:
-            return 25.0
+            return fallback
+        return rate if rate > 0 else fallback
     try:
-        return float(text)
+        rate = float(text)
     except ValueError:
-        return 25.0
+        return fallback
+    return rate if rate > 0 else fallback
 
 
 def _frame_count(stream: dict, fmt: dict, fps: float) -> int:

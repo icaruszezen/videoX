@@ -133,7 +133,11 @@ def test_progress_lines_parse():
     insight = parse_engine_line('{"videox_progress": {"phase": "restore", "current": 1, "total": 4}}')
     assert insight is not None
     assert insight.stage == "restore"
-    assert insight.progress == 0.25
+    assert insight.progress == 0.10 + 0.90 * 0.25
+    loaded = parse_engine_line('{"videox_progress": {"phase": "load", "current": 1, "total": 1}}')
+    assert loaded is not None and loaded.progress == 0.10
+    downloaded = parse_engine_line('{"videox_progress": {"phase": "download", "current": 1, "total": 1}}')
+    assert downloaded is not None and downloaded.progress == 0.05
     preview = parse_engine_line('{"videox_preview": {"frame": 3}}')
     assert preview is not None
     assert preview.preview_frame == 3
@@ -161,3 +165,41 @@ def test_realbasicvsr_forward_shape():
     with torch.inference_mode():
         one = model(single)
     assert tuple(one.shape) == (1, 1, 3, 256, 256)
+
+
+def test_flashvsr_and_swiftvr_check_their_new_options(tmp_path: Path):
+    context = _context(tmp_path)
+    flash = FlashVSREngine().build_command(_video_job(tmp_path, "flashvsr", kv_ratio=4), context)
+    assert flash[flash.index("--kv-ratio") + 1] == "4"
+    with pytest.raises(VideoXError, match="KV"):
+        FlashVSREngine().build_command(_video_job(tmp_path, "flashvsr", kv_ratio=1), context)
+    swift = SwiftVREngine().build_command(_video_job(tmp_path, "swiftvr", short_side=1081), context)
+    assert swift[swift.index("--short-side") + 1] == "1080"
+    plain = SwiftVREngine().build_command(_video_job(tmp_path, "swiftvr"), context)
+    assert "--short-side" not in plain
+    with pytest.raises(VideoXError, match="输出短边"):
+        SwiftVREngine().build_command(_video_job(tmp_path, "swiftvr", short_side=32), context)
+
+
+def test_frame_and_size_helpers():
+    from videox.engines.flashvsr.infer import _smallest_8n1_at_least, _target_size
+    from videox.engines.swiftvr.infer import _output_size
+
+    assert [_smallest_8n1_at_least(n) for n in (1, 9, 10, 18, 25)] == [1, 9, 17, 25, 25]
+    # 400x240 ×4 = 1600x960, already multiples of 128 on neither side.
+    assert _target_size(400, 240, 4) == (1600, 960, 1664, 1024)
+    assert _target_size(256, 128, 2) == (512, 256, 512, 256)
+    with pytest.raises(VideoXError):
+        _target_size(0, 240, 4)
+    assert _output_size(1920, 1080, 0) is None
+    assert _output_size(640, 360, 1080) == (1920, 1080)
+    assert _output_size(360, 640, 1080) == (1080, 1920)
+    assert _output_size(720, 480, 1080) == (1620, 1080)
+
+
+def test_step_fields_reach_the_schema():
+    manifests = {item.id: item for item in default_registry().manifests()}
+    seed = manifests["seedvr2"].params_schema["properties"]
+    swift = manifests["swiftvr"].params_schema["properties"]
+    assert (seed["batch_size"]["minimum"], seed["batch_size"]["step"]) == (1, 4)
+    assert (swift["clip_len"]["minimum"], swift["clip_len"]["step"]) == (4, 4)

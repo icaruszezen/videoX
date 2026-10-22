@@ -11,6 +11,7 @@ from videox.engines.seedvr2.presets import REQUIRED_MODELS
 from videox.engines.swiftvr.weights import weight_lists as swift_weight_lists
 from videox.hardware.gpus import query_gpus
 from videox.paths import (
+    engine_venv_ready,
     flashvsr_dir,
     flashvsr_rev_file,
     model_dir,
@@ -119,7 +120,7 @@ def _engine_statuses(root: Path) -> list[EngineStatus]:
     if sparse_marker == "ready":
         flash_detail = "稀疏注意力已编译"
     elif sparse_marker == "missing":
-        flash_detail = "将使用整块注意力，速度更慢"
+        flash_detail = "缺少 Block-Sparse-Attention，FlashVSR 无法运行"
     elif flash_python.is_file():
         flash_detail = "尚未确认稀疏注意力"
     else:
@@ -148,7 +149,7 @@ def _engine_statuses(root: Path) -> list[EngineStatus]:
             present=flash_present,
             commit=flash_commit,
             commit_expected=flash_expected,
-            venv_ready=flash_python.is_file(),
+            venv_ready=engine_venv_ready(flash_root) and sparse_marker != "missing",
             model_dir=str(flash_weights),
             models_present=flash_present_files,
             models_missing=flash_missing,
@@ -160,7 +161,7 @@ def _engine_statuses(root: Path) -> list[EngineStatus]:
             present=(swift_root / "swiftvr").is_dir(),
             commit=_git_head(swift_root),
             commit_expected=_expected(swiftvr_rev_file(root)),
-            venv_ready=venv_python(swift_root).is_file(),
+            venv_ready=engine_venv_ready(swift_root),
             model_dir=str(swift_weights),
             models_present=swift_present_files,
             models_missing=swift_missing,
@@ -198,8 +199,8 @@ def _engine_warnings(engines: list[EngineStatus]) -> list[str]:
             warnings.append(
                 f"{engine.name} 权重尚未下载，首次运行会自动拉取: " + ", ".join(engine.models_missing)
             )
-        if engine.id == "flashvsr" and engine.detail.startswith("将使用整块"):
-            warnings.append("FlashVSR 没有编译 Block-Sparse-Attention，会改用整块注意力")
+        if engine.id == "flashvsr" and engine.detail.startswith("缺少 Block-Sparse"):
+            warnings.append("FlashVSR 缺少 Block-Sparse-Attention，无法运行，请安装 CUDA Toolkit 后重新运行 videox setup")
     return warnings
 
 

@@ -20,7 +20,7 @@ from videox.engines.flashvsr.presets import (
 )
 from videox.errors import VideoXError
 from videox.jobs.models import EngineManifest, JobSpec
-from videox.paths import flashvsr_dir, venv_python, weights_dir
+from videox.paths import engine_venv_ready, flashvsr_dir, venv_python, weights_dir
 
 
 class FlashVSREngine:
@@ -30,7 +30,7 @@ class FlashVSREngine:
         return EngineManifest(
             id=self.id,
             name="FlashVSR",
-            description="一步扩散超分，默认用 Tiny Long 流式处理长视频。比 SeedVR2 更快、更省显存，主要做 4 倍放大。只使用一张显卡。",
+            description="一步扩散超分，默认用 Tiny Long 流式送进显卡。比 SeedVR2 更快、更省显存，主要做 4 倍放大；内存占用随视频时长增长。只使用一张显卡。",
             capabilities=["upscale"],
             media=["video"],
             device_policy="single",
@@ -41,9 +41,15 @@ class FlashVSREngine:
         return weights_dir("FlashVSR", root)
 
     def resolve_python(self, ctx: EngineContext) -> str:
-        python = venv_python(flashvsr_dir(ctx.project_root))
+        root = flashvsr_dir(ctx.project_root)
+        python = venv_python(root)
         if not python.is_file():
             raise VideoXError("FlashVSR 还没有安装。请运行 videox setup。")
+        sparse = root / ".videox-sparse"
+        if sparse.is_file() and sparse.read_text(encoding="utf-8").strip() == "missing":
+            raise VideoXError("FlashVSR 缺少 Block-Sparse-Attention，无法运行。请安装 CUDA Toolkit 后重新运行 videox setup。")
+        if not engine_venv_ready(root):
+            raise VideoXError("FlashVSR 的依赖没有装好。请重新运行 videox setup。")
         return str(python)
 
     def working_directory(self, ctx: EngineContext) -> Path | None:
@@ -77,7 +83,9 @@ class FlashVSREngine:
             "局部范围",
         )
         sparse_ratio = _as_float(params.get("sparse_ratio", DEFAULT_SPARSE_RATIO), "稀疏比", 0.5, 5)
-        kv_ratio = _as_float(params.get("kv_ratio", DEFAULT_KV_RATIO), "KV 比", 1, 8)
+        kv_ratio = _as_int(params.get("kv_ratio", DEFAULT_KV_RATIO), "KV 比")
+        if not 2 <= kv_ratio <= 8:
+            raise VideoXError("KV 比 需要在 2 到 8 之间")
         seed = _as_int(params.get("seed", DEFAULT_SEED), "随机种子")
         color_fix = _as_bool(params.get("color_fix", True), "色彩校正")
         device = chosen_device(job, ctx)
@@ -100,7 +108,7 @@ class FlashVSREngine:
             "--local-range",
             local_range,
             "--kv-ratio",
-            _format_float(kv_ratio),
+            str(kv_ratio),
             "--seed",
             str(seed),
             "--device",
