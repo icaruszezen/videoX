@@ -21,8 +21,8 @@
 | SCUNet | 盲去噪 | 图片 | 单卡 | 不放大 | 主虚拟环境 |
 | GFPGAN | 人脸修复，背景可交给 Real-ESRGAN | 图片 | 单卡 | 1、2、4 倍，默认 2 倍 | 主虚拟环境 |
 
-- **SeedVR2**：默认使用 3B FP8 模型、VAE 分块、时间重叠 3 帧，按每张卡 12–16GB 显存配置。视频批大小按所选显卡中显存最小的一张自动选择：约 12GB 每批 5 帧，约 16GB 及以上每批 9 帧（批大小必须是 4n+1）。检测到两张及以上显卡时默认使用前两张，按帧分段，每张卡各加载一份模型。还可以切换 3B/7B、FP16/GGUF、Sharp 等模型，以及色彩校正、显存卸载、`torch.compile`、PNG 序列输出、10-bit MP4 等选项。
-- **FlashVSR**：默认 Tiny Long 模式，比 SeedVR2 更快、更省显存。依赖 Block-Sparse-Attention 稀疏注意力内核，安装时要在本机编译，没装好时 FlashVSR 不能使用（其他引擎不受影响）。模型要求宽高是 128 的倍数、帧数是 8n+1，封装会先补边、补帧，成片再裁回原片放大后的尺寸和原来的帧数，帧率与原片一致。
+- **SeedVR2**：默认使用 3B FP8 模型、VAE 分块、时间重叠 3 帧，按每张卡 12–16GB 显存配置。视频批大小按所选显卡中显存最小的一张自动选择：约 12GB 每批 5 帧，约 16GB 及以上每批 9 帧（批大小必须是 4n+1）。检测到两张及以上显卡时默认使用前两张，按帧分段，每张卡各加载一份模型；但多卡时整段修复结果要先放在内存里再写出，估算超过本机一半内存的长视频会自动只用第一张卡（单卡按 `chunk_size` 边处理边写出），手动选了多张卡时则在提交时报错。还可以切换 3B/7B、FP16/GGUF、Sharp 等模型，以及色彩校正、显存卸载、`torch.compile`、PNG 序列输出、10-bit MP4 等选项。
+- **FlashVSR**：默认 Tiny Long 模式（另有细节更多、更慢的 Full 模式），比 SeedVR2 更快、更省显存。每 8 帧一段，边读边处理边写出，内存和显存不随视频时长增长，一小时的视频也能处理；显存只随输出的宽×高、KV 比和模式增长，开始处理时会打印这次的估计值，超过显卡显存时会提示。粗略估计：原片 480p 用 Tiny Long，2 倍约需 13–16 GB，4 倍要 40 GB 左右；输出 1080p 时 KV 比每加 1 多约 3 GB，Full 模式再多约 10 GB。显存不够时改用 2 倍或把 KV 比调到 2。依赖 Block-Sparse-Attention 稀疏注意力内核，安装时要在本机编译，没装好时 FlashVSR 不能使用（其他引擎不受影响）。模型要求宽高是 128 的倍数、帧数是 8n+1，封装会先补边、补帧，成片再裁回原片放大后的尺寸和原来的帧数，帧率与原片一致。
 - **SwiftVR**：权重是研究许可，个人本地使用可以，商用需要作者书面授权。
 - **RealBasicVSR**：网络结构直接实现在本仓库里，不需要额外检出上游代码，速度通常更快，细节和人脸弱于扩散模型。
 - **图片引擎**（Real-ESRGAN、SwinIR、SCUNet、GFPGAN）：网络结构也直接实现在本仓库里，用主环境运行。每个引擎都有几个模型可选，例如 Real-ESRGAN 的照片、动漫和轻量通用模型，SwinIR 的超分、去噪和去 JPEG 压缩模型，GFPGAN 的 v1.4/v1.3。表单按所选模型切换参数和默认值：只有用得上的参数才显示（例如去噪强度只对轻量通用模型出现，GFPGAN 只修人脸时不显示背景分块设置），倍数等默认值跟着模型变。大图分块处理，显存不够时把分块大小调小。GFPGAN 的背景放大复用 Real-ESRGAN 的模型和权重。
@@ -66,7 +66,7 @@ FlashVSR 或 SwiftVR 没装好时，`videox setup` 会报出是哪个引擎失�
 | 引擎 | 目录 | 来源和文件 |
 | --- | --- | --- |
 | SeedVR2 | `models\SEEDVR2` | 由 SeedVR2 上游代码下载，默认需要 `seedvr2_ema_3b_fp8_e4m3fn.safetensors` 和 `ema_vae_fp16.safetensors`；换用其他扩散模型时再下载对应文件 |
-| FlashVSR | `models\FlashVSR` | Hugging Face `JunhaoZhuang/FlashVSR-v1.1`：`diffusion_pytorch_model_streaming_dmd.safetensors`、`LQ_proj_in.ckpt`，Tiny 和 Tiny Long 模式再加 `TCDecoder.ckpt`；`Wan2.1_VAE.pth` 只在第一次用 Full 模式时下载 |
+| FlashVSR | `models\FlashVSR` | Hugging Face `JunhaoZhuang/FlashVSR-v1.1`：`diffusion_pytorch_model_streaming_dmd.safetensors`、`LQ_proj_in.ckpt`，Tiny Long 模式再加 `TCDecoder.ckpt`；`Wan2.1_VAE.pth` 只在第一次用 Full 模式时下载 |
 | SwiftVR | `models\SwiftVR` | Hugging Face `H-oliday/SwiftVR`：`reae.safetensors`、`prompt_embedding.safetensors`、`transformer/config.json`、`transformer/diffusion_pytorch_model.safetensors` |
 | RealBasicVSR | `models\RealBasicVSR` | OpenMMLab（MMEditing）发布的 `realbasicvsr_c64b20_1x30x8_lr5e-5_150k_reds_20211104-52f77c2c.pth`，本地保存为 `RealBasicVSR_x4.pth` |
 | Real-ESRGAN | `models\RealESRGAN` | `xinntao/Real-ESRGAN` 的 GitHub Releases，按所选模型下载，默认是 `RealESRGAN_x4plus.pth` |
@@ -172,7 +172,7 @@ npm run dev
 - **图片**：选择图片引擎和其中的模型处理单张图片，表单按所选模型切换参数和默认值，任务进度和对比显示在同一页。
 - **系统**：显示 `GET /system` 的内容，包括显卡、PyTorch、ffmpeg、各引擎的检出、虚拟环境和权重状态。
 
-对比用的预览帧由引擎写出：SeedVR2 在后处理阶段更新为最近完成的一帧，RealBasicVSR 每处理完一段更新一次，FlashVSR 和 SwiftVR 只在整段处理完后给出首帧，图片引擎在整张处理完后给出结果。
+对比用的预览帧由引擎写出：SeedVR2 在后处理阶段更新为最近完成的一帧，RealBasicVSR 每处理完一段更新一次，FlashVSR 处理第一段后给出画面、之后约每 10 秒更新一次，SwiftVR 只在整段处理完后给出首帧，图片引擎在整张处理完后给出结果。
 
 窗口刷新后，界面会从 `output\.session-jobs.json` 找回本次会话的任务（前提是服务进程还在）。桌面端关闭了 Electron 的硬件加速，避免窗口和修复任务争用同一张显卡导致界面卡死。
 
@@ -180,7 +180,7 @@ npm run dev
 
 ## 注意事项
 
-- **长视频的内存**：SeedVR2 的 `chunk_size` 默认是 120，每次读入 120 帧分段处理；设为 0 时整段视频一次读入，只适合很短的片段。FlashVSR 的封装会先把整段视频放大到输出分辨率后全部放进内存再交给模型，内存占用随时长和分辨率增长，长片或高分辨率素材建议先剪短或换用其他引擎。
+- **长视频的内存**：SeedVR2 的 `chunk_size` 默认是 120，每次读入 120 帧分段处理；设为 0 时整段视频一次读入，只适合很短的片段。FlashVSR 和 RealBasicVSR 边读边处理，内存不随时长增长。
 - **音轨和其他流**：回封只保留原片的第一条音轨，其他音轨和字幕不会保留。设置了 SeedVR2 的 `skip_first_frames` 但读不到原片帧率时，为免音画错开，成片不带音轨。
 - **覆盖和中间文件**：已存在的输出文件会被直接覆盖，不会提示。回封失败或任务取消时，`<输出名>.video-only.mp4` 会留在输出目录里。
 

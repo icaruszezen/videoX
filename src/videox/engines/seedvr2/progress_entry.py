@@ -365,6 +365,16 @@ def _configure_parent(argv: list[str]) -> None:
     _job["workers"] = devices
 
 
+def pop_note(argv: list[str]) -> str | None:
+    """Take VideoX's --videox_note TEXT out of argv before upstream's parser sees it."""
+    if "--videox_note" not in argv:
+        return None
+    index = argv.index("--videox_note")
+    note = argv[index + 1] if index + 1 < len(argv) else ""
+    del argv[index : index + 2]
+    return note
+
+
 def device_count(argv: list[str]) -> int:
     """Number of GPUs in --cuda_device, split the way upstream main() splits it."""
     for index, token in enumerate(argv[:-1]):
@@ -566,6 +576,9 @@ def _safe_int(value, default: int) -> int:
 
 
 def main() -> int:
+    note = pop_note(sys.argv)
+    if note:
+        print(note, flush=True)
     root = _bootstrap_seedvr()
     saved_pythonpath = os.environ.get("PYTHONPATH", "")
     _configure_parent(sys.argv)

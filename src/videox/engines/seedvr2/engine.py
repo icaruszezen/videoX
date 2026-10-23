@@ -25,8 +25,10 @@ from videox.engines.seedvr2.presets import (
 )
 from videox.errors import VideoXError
 from videox.hardware.gpus import batch_size_for_devices, default_devices, query_gpus
+from videox.hardware.memory import physical_memory_bytes
 from videox.jobs.models import EngineManifest, JobSpec
 from videox.media.ffmpeg import MediaInfo
+from videox.media.frames import probe_video
 from videox.paths import seedvr2_dir
 
 # Containers upstream's inference_cli accepts as video input (VIDEO_EXTENSIONS).
@@ -40,7 +42,7 @@ class SeedVR2Engine:
         return EngineManifest(
             id=self.id,
             name="SeedVR2",
-            description="一步扩散修复，支持视频和图片。双卡时视频按帧分段，每张卡各加载一份所选模型；图片只用一张卡。",
+            description="一步扩散修复，支持视频和图片。双卡时视频按帧分段，每张卡各加载一份所选模型，但整段结果要先放在内存里，内存放不下的长视频只用一张卡；图片只用一张卡。",
             capabilities=["upscale"],
             media=["video", "image"],
             device_policy="multi",
@@ -85,6 +87,7 @@ class SeedVR2Engine:
         devices = job.devices if job.devices is not None else default_devices(gpus)
         if not devices:
             raise VideoXError("没有可用的 CUDA 设备")
+        note: str | None = None
         if not video:
             # Upstream splits a one-frame image into fewer pieces than GPUs and then
             # waits forever for the missing worker; one card is enough for one image.
@@ -94,6 +97,8 @@ class SeedVR2Engine:
             if isinstance(cap, int) and not isinstance(cap, bool) and 0 < cap < len(devices):
                 # A GPU with no frames to process crashes its worker.
                 devices = list(devices)[:cap]
+            if len(devices) > 1:
+                devices, note = _devices_that_fit_in_memory(source, params, list(devices), job.devices is not None)
 
         if video and "batch_size" not in params:
             batch_size = batch_size_for_devices(devices, gpus)
@@ -207,6 +212,8 @@ class SeedVR2Engine:
                     str(prepend_frames),
                 ]
             )
+        if note:
+            command.extend(["--videox_note", note])
         command.extend(
             [
                 "--color_correction",
@@ -291,6 +298,57 @@ def _check_tiles(size: int, overlap: int, label: str) -> None:
         raise VideoXError(f"{label}块重叠不能小于 0")
     if overlap >= size:
         raise VideoXError(f"{label}块重叠（{overlap}）必须小于{label}块大小（{size}）")
+
+
+
+def _devices_that_fit_in_memory(
+    source: Path, params: dict, devices: list[int], explicit: bool
+) -> tuple[list[int], str | None]:
+    """Several GPUs keep the whole restored video in RAM until the end; long clips need one.
+
+    Upstream's multi-GPU path collects every worker's frames as float32 and joins
+    them before writing, while one GPU writes each chunk as it finishes.
+    """
+    need = _whole_output_bytes(source, params)
+    ram = physical_memory_bytes()
+    # The parent holds the workers' frames and a joined float32 copy; leave half the RAM free.
+    if need is None or ram is None or need * 2 <= ram // 2:
+        return devices, None
+    message = (
+        f"SeedVR2 用多张显卡时要把整段修复结果留在内存里，这段视频约需 {need * 2 / 1e9:.0f} GB，"
+        f"本机内存 {ram / 1e9:.0f} GB。"
+    )
+    if explicit:
+        raise VideoXError(
+            message + "请只选一张显卡（单卡按“分块大小”边处理边写出），或用“跳过开头”和“最多处理帧数”分段处理。"
+        )
+    return devices[:1], message + "这次只用第一张显卡，按分块边处理边写出。"
+
+
+def _whole_output_bytes(source: Path, params: dict) -> int | None:
+    """float32 RGB bytes of the whole restored clip, from the probe and the size settings."""
+    try:
+        probe = probe_video(source)
+    except (VideoXError, OSError):
+        return None
+    frames = probe.frame_count
+    skip = params.get("skip_first_frames", 0)
+    if isinstance(skip, int) and not isinstance(skip, bool) and skip > 0:
+        frames -= skip
+    cap = params.get("load_cap", 0)
+    if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
+        frames = min(frames, cap)
+    resolution = params.get("resolution", DEFAULT_RESOLUTION)
+    longest = params.get("max_resolution", 0)
+    if frames <= 0 or not isinstance(resolution, int) or isinstance(resolution, bool) or resolution < 1:
+        return None
+    short_side, long_side = sorted((probe.width, probe.height))
+    if short_side < 1:
+        return None
+    out_short, out_long = resolution, resolution * long_side / short_side
+    if isinstance(longest, int) and not isinstance(longest, bool) and 0 < longest < out_long:
+        out_short, out_long = out_short * longest / out_long, longest
+    return int(frames * out_short * out_long * 3 * 4)
 
 
 def _as_int(value: object, label: str) -> int:
