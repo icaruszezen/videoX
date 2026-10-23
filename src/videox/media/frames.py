@@ -38,6 +38,9 @@ class FrameReader:
         self._process = subprocess.Popen(
             [
                 ffmpeg_executable(),
+                # Keys typed in the console must not reach ffmpeg: "q" would end the
+                # video early with exit code 0.
+                "-nostdin",
                 "-v",
                 "error",
                 "-i",
@@ -55,6 +58,7 @@ class FrameReader:
                 "rgb24",
                 "-",
             ],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=self._stderr,
         )
@@ -78,6 +82,11 @@ class FrameReader:
         lines = self._stderr.read().decode("utf-8", "replace").strip().splitlines()
         tail = "\n".join(lines[-20:])
         raise VideoXError(f"读取视频失败 (ffmpeg {code}): {tail}")
+
+    def kill(self) -> None:
+        """Stop decoding early, from any thread; close() still reaps the process."""
+        if self._process.poll() is None:
+            self._process.kill()
 
     def close(self) -> None:
         # Never raises: closing early makes ffmpeg exit non-zero on purpose.

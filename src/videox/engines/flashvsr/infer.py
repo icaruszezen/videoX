@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from videox.engines.flashvsr.presets import weights_for
+from videox.engines.flashvsr.stream import InputFrames, OutputVideo, restore_stream, target_size
 from videox.engines.flashvsr.weights import ensure_weights
-from videox.engines.preview_io import publish_pair
 from videox.engines.progress import emit_progress
 from videox.errors import VideoXError
-from videox.media.frames import BT709_OUTPUT_FILTER, probe_video
+from videox.media.frames import FrameReader, probe_video
 
 
 @dataclass(frozen=True)
@@ -40,9 +39,28 @@ def run_flashvsr(request: FlashRequest) -> None:
             "FlashVSR 需要 Block-Sparse-Attention（稀疏注意力内核），当前环境没有装好。"
             "请安装 CUDA Toolkit 后重新运行 videox setup。"
         )
-    _patch_tqdm()
-    # Fail on an unreadable input before downloading and loading several GB of models.
-    probe_video(request.input_path)
+    import torch
+
+    # Fail on an unreadable input, and show what the GPU must hold, before
+    # downloading and loading several GB of models.
+    probe = probe_video(request.input_path)
+    scaled_w, scaled_h, padded_w, padded_h = target_size(probe.width, probe.height, request.scale)
+    full = request.mode == "full"
+    need = vram_estimate_gb(padded_w, padded_h, request.kv_ratio, full=full)
+    history = (request.kv_ratio + 1) * padded_w * padded_h * HISTORY_BYTES / GB
+    detail = f"其中历史参考（KV 缓存）约 {history:.1f} GB"
+    if full:
+        detail += f"，Full 模式的解码缓存约 {padded_w * padded_h * VAE_CACHE_BYTES / GB:.1f} GB"
+    print(
+        f"原片 {probe.width}x{probe.height}，约 {probe.frame_count} 帧，{probe.fps:g} fps；"
+        f"输出 {scaled_w}x{scaled_h}，每 8 帧一段边读边处理，显存占用和视频长短无关；"
+        f"按这个输出尺寸和 KV 比 {request.kv_ratio}，估计需要约 {need:.0f} GB 显存（{detail}）",
+        flush=True,
+    )
+    card = _card_gb(torch)
+    advice = _advice(request)
+    if card is not None and need > card:
+        print(f"注意：这张显卡只有 {card:.0f} GB，很可能显存不足。{advice}", flush=True)
     emit_progress("download", 0, 1)
     ensure_weights(request.model_dir, weights_for(request.mode))
     emit_progress("download", 1, 1)
@@ -50,59 +68,80 @@ def run_flashvsr(request: FlashRequest) -> None:
     pipe = _init_pipeline(request.model_dir, request.mode)
     emit_progress("load", 1, 1)
     emit_progress("restore", 0, 1)
-    clip = _prepare_input(request.input_path, request.scale)
-    low_quality = clip.video
-    if request.mode != "tiny-long":
-        # Only the Tiny Long pipeline moves each slice of the input to the GPU itself.
-        low_quality = low_quality.to(pipe.device)
-    height, width = clip.padded_h, clip.padded_w
-    _ensure_rope_length(pipe, clip.count)
-    topk = request.sparse_ratio * 768 * 1280 / float(height * width)
-    kwargs = {
-        "prompt": "",
-        "negative_prompt": "",
-        "cfg_scale": 1.0,
-        "num_inference_steps": 1,
-        "seed": request.seed,
-        "LQ_video": low_quality,
-        "num_frames": clip.count,
-        "height": height,
-        "width": width,
-        "is_full_block": False,
-        "if_buffer": True,
-        "topk_ratio": topk,
-        "kv_ratio": request.kv_ratio,
-        "local_range": request.local_range,
-        "color_fix": request.color_fix,
-    }
-    if request.mode == "full":
-        kwargs["tiled"] = False
-    video = pipe(**kwargs)
-    del low_quality
-    kwargs.clear()
-    clip.video = None
-    # The input was padded with copies of the last frame and edge pixels; keep
-    # only the source frames at the plain ×N size.
-    video = video[:, : clip.total, : clip.scaled_h, : clip.scaled_w]
-    _save_video(video, request.output_path, clip.fps, clip.rate, clip.sar)
-    _publish(video, clip.source)
+    frames = InputFrames(FrameReader(request.input_path), request.scale)
+    try:
+        reader = frames.reader
+        output = OutputVideo(request.output_path, frames, reader.fps, reader.rate, reader.sar, reader.frame_count)
+        try:
+            restore_stream(
+                pipe,
+                frames,
+                output.write,
+                full=full,
+                seed=request.seed,
+                sparse_ratio=request.sparse_ratio,
+                kv_ratio=request.kv_ratio,
+                local_range=request.local_range,
+                color_fix=request.color_fix,
+            )
+        except torch.cuda.OutOfMemoryError as exc:
+            on_card = f"，这张显卡 {card:.0f} GB" if card is not None else ""
+            raise VideoXError(
+                f"显存不足：输出 {scaled_w}x{scaled_h}、KV 比 {request.kv_ratio} 时估计需要约 {need:.0f} GB 显存"
+                f"{on_card}。FlashVSR 逐段处理，显存和视频长短无关，只随输出的宽×高和 KV 比增长。{advice}"
+            ) from exc
+        finally:
+            output.close()
+    finally:
+        frames.close()
+    if not request.output_path.is_file():
+        raise VideoXError(f"引擎没有写出视频: {request.output_path}")
     emit_progress("restore", 1, 1)
 
 
-def _ensure_rope_length(pipe, frames: int) -> None:
-    """Grow the DiT's temporal RoPE table for clips longer than about 4100 frames.
+GB = 1024**3
+# GPU memory per output pixel, from replaying upstream's modules in bf16 at
+# 1920x1152 output. The working-memory figures were measured on the CPU, so
+# the estimate is rough.
+MODEL_GB = 3.5  # weights and the CUDA context
+HISTORY_BYTES = 1440  # one step of K and V: 2 latent frames, 30 blocks, 1536 values per token
+DIT_BYTES = 630  # one DiT block's working memory
+DECODER_BYTES = 2700  # TCDecoder's working memory while a step is decoded
+VAE_BYTES = 5000  # the Wan VAE's working memory while a step is decoded
+VAE_CACHE_BYTES = 4729  # Full: the Wan VAE's causal cache, kept between steps
 
-    Upstream builds 1024 positions and indexes them at 4 + 2 * step. Longer
-    tables share their first 1024 rows with the default one.
+
+def vram_estimate_gb(padded_w: int, padded_h: int, kv_ratio: int, *, full: bool) -> float:
+    """Peak GPU memory of one step, in GiB; it does not depend on the length of the video.
+
+    While the DiT runs it holds kv_ratio past steps plus the current one;
+    restore_stream trims that back to kv_ratio before the decoder runs.
     """
-    from diffsynth.models.wan_video_dit import precompute_freqs_cis_3d
+    dit = (kv_ratio + 1) * HISTORY_BYTES + DIT_BYTES
+    decode = kv_ratio * HISTORY_BYTES + (VAE_BYTES if full else DECODER_BYTES)
+    cache = VAE_CACHE_BYTES if full else 0
+    return MODEL_GB + padded_w * padded_h * (cache + max(dit, decode)) / GB
 
-    dit = pipe.denoising_model()
-    needed = 4 + 2 * ((frames - 1) // 8) + 8
-    if dit.freqs[0].shape[0] >= needed:
-        return
-    head_dim = 2 * sum(int(table.shape[1]) for table in dit.freqs)
-    dit.freqs = precompute_freqs_cis_3d(head_dim, end=needed)
+
+def _card_gb(torch) -> float | None:
+    try:
+        return torch.cuda.get_device_properties(0).total_memory / GB
+    except Exception:
+        return None
+
+
+def _advice(request: FlashRequest) -> str:
+    options = []
+    if request.mode == "full":
+        options.append("改用 Tiny Long 模式")
+    if request.scale > 2:
+        options.append("改用 2 倍放大")
+    if request.kv_ratio > 2:
+        options.append("把 KV 比调到 2")
+    options.append("先把原片缩小")
+    if len(options) == 1:
+        return f"请{options[0]}。"
+    return f"请{'、'.join(options[:-1])}，或{options[-1]}。"
 
 
 def _sparse_kernel_ready() -> bool:
@@ -114,28 +153,6 @@ def _sparse_kernel_ready() -> bool:
     except Exception:
         return False
     return True
-
-
-def _patch_tqdm() -> None:
-    import tqdm as tqdm_module
-
-    original = tqdm_module.tqdm
-
-    class ReportingTqdm(original):
-        def update(self, n=1):
-            result = super().update(n)
-            total = self.total or 0
-            if total:
-                emit_progress("restore", float(self.n or 0), float(total))
-            return result
-
-    tqdm_module.tqdm = ReportingTqdm
-    try:
-        import tqdm.auto as auto
-
-        auto.tqdm = ReportingTqdm
-    except Exception:
-        return
 
 
 def _init_pipeline(model_dir: Path, mode: str):
@@ -151,12 +168,9 @@ def _init_pipeline(model_dir: Path, mode: str):
 
         manager.load_models([str(dit), str(model_dir / "Wan2.1_VAE.pth")])
         pipe = FlashVSRFullPipeline.from_model_manager(manager, device="cuda")
-    elif mode == "tiny":
-        from diffsynth import FlashVSRTinyPipeline
-
-        manager.load_models([str(dit)])
-        pipe = FlashVSRTinyPipeline.from_model_manager(manager, device="cuda")
     else:
+        # Tiny only differs from Tiny Long in keeping the whole clip on the GPU;
+        # restore_stream drives both the same way.
         from diffsynth import FlashVSRTinyLongPipeline
 
         manager.load_models([str(dit)])
@@ -186,136 +200,3 @@ def _init_pipeline(model_dir: Path, mode: str):
     pipe.init_cross_kv()
     pipe.load_models_to_device(["dit", "vae"])
     return pipe
-
-
-@dataclass
-class _Clip:
-    video: object
-    total: int
-    count: int
-    scaled_w: int
-    scaled_h: int
-    padded_w: int
-    padded_h: int
-    fps: float
-    rate: str
-    sar: str | None
-    source: object
-
-
-def _prepare_input(path: Path, scale: int) -> _Clip:
-    import numpy as np
-    import torch
-    from PIL import Image
-
-    from videox.media.frames import FrameReader
-
-    # ffmpeg, not imageio: imageio cannot open .m4v/.flv/.3gp/.ts by itself and
-    # VFR clips need the same constant rate the output is written at.
-    reader = FrameReader(path)
-    try:
-        frames: list[bytes] = []
-        while batch := reader.read_many(64):
-            frames.extend(batch)
-        reader.finish()
-    finally:
-        reader.close()
-    total = len(frames)
-    if total <= 0:
-        raise VideoXError(f"读不到视频帧: {path}")
-    width, height = reader.width, reader.height
-    scaled_w, scaled_h, padded_w, padded_h = _target_size(width, height, scale)
-    print(f"原片 {width}x{height}，{total} 帧，{reader.fps:g} fps；输出 {scaled_w}x{scaled_h}", flush=True)
-    source = np.frombuffer(frames[0], dtype=np.uint8).reshape(height, width, 3).copy()
-    # The pipeline needs 8k+1 frames and drops the last 4; pad with the last
-    # frame instead of cutting the tail off, and trim the result later.
-    count = _smallest_8n1_at_least(max(total + 4, 25))
-    video = torch.empty((1, 3, count, padded_h, padded_w), dtype=torch.bfloat16)
-    for slot in range(total):
-        image = Image.frombytes("RGB", (width, height), frames[slot])
-        frames[slot] = b""
-        video[0, :, slot] = _to_tensor(_upscale_pad(image, scaled_w, scaled_h, padded_w, padded_h))
-    video[0, :, total:] = video[0, :, total - 1 : total]
-    return _Clip(
-        video, total, count, scaled_w, scaled_h, padded_w, padded_h, reader.fps, reader.rate, reader.sar, source
-    )
-
-
-def _smallest_8n1_at_least(count: int) -> int:
-    return ((max(count, 1) - 1 + 7) // 8) * 8 + 1
-
-
-def _target_size(width: int, height: int, scale: int) -> tuple[int, int, int, int]:
-    """The ×N size, and that size padded up to the multiple of 128 FlashVSR needs."""
-    scaled_w = int(round(width * scale))
-    scaled_h = int(round(height * scale))
-    if scaled_w < 1 or scaled_h < 1:
-        raise VideoXError(f"读不到有效的画面尺寸: {width}x{height}")
-    padded_w = -(-scaled_w // 128) * 128
-    padded_h = -(-scaled_h // 128) * 128
-    return scaled_w, scaled_h, padded_w, padded_h
-
-
-def _upscale_pad(image, scaled_w: int, scaled_h: int, padded_w: int, padded_h: int):
-    import numpy as np
-    from PIL import Image
-
-    enlarged = np.asarray(image.resize((scaled_w, scaled_h), Image.BICUBIC), dtype=np.uint8)
-    return np.pad(
-        enlarged,
-        ((0, padded_h - scaled_h), (0, padded_w - scaled_w), (0, 0)),
-        mode="edge",
-    )
-
-
-def _to_tensor(image):
-    import numpy as np
-    import torch
-
-    array = np.array(image, dtype=np.uint8, copy=True)
-    tensor = torch.from_numpy(array).permute(2, 0, 1).float().div(255).mul(2).sub(1)
-    return tensor.to(dtype=torch.bfloat16)
-
-
-def _save_video(video, path: Path, fps: float, rate: str | None, sar: str | None = None) -> None:
-    import imageio.v2 as imageio
-    import numpy as np
-    import torch
-    from einops import rearrange
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # imageio writes -r with two decimals; a later input -r keeps 30000/1001 exact.
-    extra = {"input_params": ["-r", rate]} if rate else {}
-    filters = BT709_OUTPUT_FILTER + (f",setsar={sar}" if sar else "")
-    writer = imageio.get_writer(
-        str(path), fps=fps, quality=8, macro_block_size=None, output_params=["-vf", filters], **extra
-    )
-    try:
-        # Convert a few frames at a time on the CPU instead of the whole clip as float32.
-        for start in range(0, int(video.shape[1]), 8):
-            chunk = rearrange(video[:, start : start + 8], "C T H W -> T H W C")
-            chunk = ((chunk.detach().to("cpu", torch.float32) + 1) * 127.5).clamp(0, 255).byte().numpy()
-            for frame in chunk:
-                writer.append_data(np.asarray(frame))
-    finally:
-        writer.close()
-    if not path.is_file():
-        raise VideoXError(f"引擎没有写出视频: {path}")
-
-
-def _publish(video, source) -> None:
-    import numpy as np
-
-    frame = video[:, 0].detach().float()
-    array = ((frame + 1) * 127.5).clamp(0, 255).byte().cpu().permute(1, 2, 0).numpy()
-    source_array = np.asarray(source, dtype=np.uint8)
-    publish_pair(
-        os.environ.get("VIDEOX_PREVIEW_DIR"),
-        1,
-        array.tobytes(),
-        int(array.shape[1]),
-        int(array.shape[0]),
-        source_array.tobytes(),
-        int(source_array.shape[1]),
-        int(source_array.shape[0]),
-    )

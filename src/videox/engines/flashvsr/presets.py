@@ -24,10 +24,11 @@ def weights_for(mode: str) -> tuple[str, ...]:
     return base + (("Wan2.1_VAE.pth",) if mode == "full" else ("TCDecoder.ckpt",))
 
 MODE_CHOICES = [
-    ("tiny-long", "Tiny Long（长视频）"),
-    ("tiny", "Tiny"),
+    ("tiny-long", "Tiny Long"),
     ("full", "Full"),
 ]
+# Requests from before Tiny and Tiny Long ran the same loop.
+MODE_ALIASES = {"tiny": "tiny-long"}
 SCALE_CHOICES = [("4", "4 倍"), ("2", "2 倍")]
 LOCAL_RANGE_CHOICES = [("11", "11（更稳）"), ("9", "9（更锐）")]
 
@@ -41,14 +42,14 @@ def params_schema() -> dict:
                 DEFAULT_MODE,
                 group="primary",
                 choices=MODE_CHOICES,
-                description="Tiny Long 按流式方式逐段送进显卡，显存占用最低，是默认选择；但整段视频放大后的画面仍会放在内存里，内存占用随时长和输出分辨率增长（例如 480p 放大 4 倍，每秒视频约需 3–4 GB 内存），长视频请先剪短或改用 2 倍。Tiny 更快，Full 细节更多，但这两种会把整段放大后的视频放进显存，只适合几秒的短片。"
+                description="两种模式都每 8 帧一段，边读边处理边写出，内存和显存不随视频时长增长，一小时的视频也能处理。Tiny Long 用轻量解码器，更快、更省显存，是默认选择。Full 用 Wan VAE 解码，细节更多，但更慢，解码缓存还要一直占着显存，输出 1080p 时比 Tiny Long 多用约 10 GB；第一次使用还要多下载约 0.5 GB 权重。"
             ),
             "scale": string_field(
                 "放大倍数",
                 DEFAULT_SCALE,
                 group="primary",
                 choices=SCALE_CHOICES,
-                description="输出相对原片的倍数，宽高比不变。模型按 4 倍训练，4 倍最稳。2 倍更快、更省内存，适合原片已经比较大的时候。",
+                description="输出相对原片的倍数，宽高比不变。模型按 4 倍训练，4 倍最稳。显存随输出的宽×高增长，2 倍的输出只有 4 倍的四分之一大，更快、更省显存：原片 480p 时，Tiny Long 4 倍估计要 40 GB 左右显存，2 倍约 13–16 GB。开始处理时会打印这次的显存估计。",
             ),
             "sparse_ratio": number_field(
                 "稀疏比",
@@ -71,7 +72,7 @@ def params_schema() -> dict:
                 group="quality",
                 minimum=2,
                 maximum=8,
-                description="每步保留多少段历史（每段约 8 帧）作为参考。调低更省显存，调高更不容易丢前面的纹理。2 是最低有效值，默认 3。",
+                description="每步保留多少段历史（每段约 8 帧）作为参考。这些历史放在显存里，输出 1080p 时 KV 比每加 1 多占约 3 GB。显存不够时先调到 2；调高更不容易丢前面的纹理。2 是最低有效值，默认 3。",
             ),
             "color_fix": boolean_field(
                 "色彩校正",

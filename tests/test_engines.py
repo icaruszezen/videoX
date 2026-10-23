@@ -8,6 +8,7 @@ from videox.engines.flashvsr.engine import FlashVSREngine
 from videox.engines.progress import parse_engine_line
 from videox.engines.realbasicvsr.engine import RealBasicVSREngine
 from videox.engines.registry import default_registry
+from videox.engines.seedvr2.engine import SeedVR2Engine
 from videox.engines.swiftvr.engine import SwiftVREngine
 from videox.errors import VideoXError
 from videox.hardware.gpus import GpuInfo
@@ -237,6 +238,9 @@ def test_flashvsr_and_swiftvr_check_their_new_options(tmp_path: Path):
     assert flash[flash.index("--kv-ratio") + 1] == "4"
     with pytest.raises(VideoXError, match="KV"):
         FlashVSREngine().build_command(_video_job(tmp_path, "flashvsr", kv_ratio=1), context)
+    # Tiny now runs the same streaming loop as Tiny Long; old requests still work.
+    tiny = FlashVSREngine().build_command(_video_job(tmp_path, "flashvsr", mode="tiny"), context)
+    assert tiny[tiny.index("--mode") + 1] == "tiny-long"
     swift = SwiftVREngine().build_command(_video_job(tmp_path, "swiftvr", short_side=1081), context)
     assert swift[swift.index("--short-side") + 1] == "1080"
     plain = SwiftVREngine().build_command(_video_job(tmp_path, "swiftvr"), context)
@@ -246,15 +250,22 @@ def test_flashvsr_and_swiftvr_check_their_new_options(tmp_path: Path):
 
 
 def test_frame_and_size_helpers():
-    from videox.engines.flashvsr.infer import _smallest_8n1_at_least, _target_size
+    from videox.engines.flashvsr.infer import vram_estimate_gb
+    from videox.engines.flashvsr.stream import target_size
     from videox.engines.swiftvr.infer import _output_size
 
-    assert [_smallest_8n1_at_least(n) for n in (1, 9, 10, 18, 25)] == [1, 9, 17, 25, 25]
+    # 1080p output pads to 1920x1152: about 3 GB of history per unit of KV ratio,
+    # and Full keeps another 10 GB of decoder cache.
+    tiny = vram_estimate_gb(1920, 1152, 2, full=False)
+    assert round(vram_estimate_gb(1920, 1152, 3, full=False) - tiny, 2) == 2.97
+    assert 14 < tiny < 16
+    assert vram_estimate_gb(1920, 1152, 2, full=True) - tiny > 10
+
     # 400x240 ×4 = 1600x960, already multiples of 128 on neither side.
-    assert _target_size(400, 240, 4) == (1600, 960, 1664, 1024)
-    assert _target_size(256, 128, 2) == (512, 256, 512, 256)
+    assert target_size(400, 240, 4) == (1600, 960, 1664, 1024)
+    assert target_size(256, 128, 2) == (512, 256, 512, 256)
     with pytest.raises(VideoXError):
-        _target_size(0, 240, 4)
+        target_size(0, 240, 4)
     assert _output_size(1920, 1080, 0) is None
     assert _output_size(640, 360, 1080) == (1920, 1080)
     assert _output_size(360, 640, 1080) == (1080, 1920)
@@ -267,3 +278,34 @@ def test_step_fields_reach_the_schema():
     swift = manifests["swiftvr"].params_schema["properties"]
     assert (seed["batch_size"]["minimum"], seed["batch_size"]["step"]) == (1, 4)
     assert (swift["clip_len"]["minimum"], swift["clip_len"]["step"]) == (4, 4)
+
+
+def test_seedvr2_long_clips_stay_on_one_gpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from videox.engines.seedvr2 import engine as seedvr2_engine
+    from videox.engines.seedvr2.progress_entry import pop_note
+    from videox.media.frames import VideoProbe
+
+    frames = {"count": 108_000}
+    monkeypatch.setattr(
+        seedvr2_engine,
+        "probe_video",
+        lambda path: VideoProbe(640, 360, 30.0, "30/1", None, frames["count"]),
+    )
+    monkeypatch.setattr(seedvr2_engine, "physical_memory_bytes", lambda: 64 * 1024**3)
+    context = _context(tmp_path)
+    source = tmp_path / "in.mp4"
+    source.write_bytes(b"x")
+    auto = JobSpec(engine_id="seedvr2", input_path=str(source), output_path=str(tmp_path / "out.mp4"))
+    # An hour at 1080p would need terabytes of RAM across two GPUs; use one and say why.
+    command = SeedVR2Engine().build_command(auto, context)
+    assert command[command.index("--cuda_device") + 1] == "0"
+    note = pop_note(command)
+    assert note is not None and "只用第一张显卡" in note
+    assert "--videox_note" not in command
+    with pytest.raises(VideoXError, match="请只选一张显卡"):
+        SeedVR2Engine().build_command(_video_job(tmp_path, "seedvr2"), context)
+    # A few seconds still splits across both cards.
+    frames["count"] = 150
+    short = SeedVR2Engine().build_command(auto, context)
+    assert short[short.index("--cuda_device") + 1] == "0,1"
+    assert "--videox_note" not in short

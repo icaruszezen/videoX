@@ -14,6 +14,7 @@ from videox.engines.flashvsr.presets import (
     DEFAULT_SEED,
     DEFAULT_SPARSE_RATIO,
     LOCAL_RANGE_CHOICES,
+    MODE_ALIASES,
     MODE_CHOICES,
     SCALE_CHOICES,
     params_schema,
@@ -30,7 +31,7 @@ class FlashVSREngine:
         return EngineManifest(
             id=self.id,
             name="FlashVSR",
-            description="一步扩散超分，默认用 Tiny Long 流式送进显卡。比 SeedVR2 更快、更省显存，主要做 4 倍放大；内存占用随视频时长增长。只使用一张显卡。",
+            description="一步扩散超分，每 8 帧一段边读边处理，内存和显存不随视频时长增长，适合长视频；显存主要取决于输出分辨率。比 SeedVR2 更快、更省显存，主要做 4 倍放大。只使用一张显卡。",
             capabilities=["upscale"],
             media=["video"],
             device_policy="single",
@@ -76,7 +77,8 @@ class FlashVSREngine:
 
     def build_command(self, job: JobSpec, ctx: EngineContext) -> list[str]:
         params = job.params
-        mode = _choice(_as_str(params.get("mode", DEFAULT_MODE), "模式"), MODE_CHOICES, "模式")
+        mode = _as_str(params.get("mode", DEFAULT_MODE), "模式")
+        mode = _choice(MODE_ALIASES.get(mode, mode), MODE_CHOICES, "模式")
         scale = _choice(_as_str(params.get("scale", DEFAULT_SCALE), "放大倍数"), SCALE_CHOICES, "放大倍数")
         local_range = _choice(
             _as_str(params.get("local_range", DEFAULT_LOCAL_RANGE), "局部范围"),

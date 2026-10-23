@@ -165,6 +165,7 @@ def remux_audio(
     copied = subprocess.run(
         remux_audio_args(video_only, original, dest, ffmpeg=ffmpeg, **options),
         check=False,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -175,6 +176,7 @@ def remux_audio(
     encoded = subprocess.run(
         remux_audio_args(video_only, original, dest, ffmpeg=ffmpeg, reencode_audio=True, **options),
         check=False,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -200,6 +202,7 @@ def transmux_video(video_only: Path, dest: Path, *, hevc: bool = False) -> None:
     completed = subprocess.run(
         [*command, *_muxer_args(dest), str(dest)],
         check=False,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         encoding="utf-8",
